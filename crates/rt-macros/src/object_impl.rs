@@ -4,8 +4,8 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::{
-    Attribute, Error, FnArg, ImplItem, ImplItemFn, ItemImpl, Pat, Receiver, ReturnType, Signature,
-    Token, Visibility,
+    Attribute, Error, FnArg, Ident, ImplItem, ImplItemFn, ItemImpl, Pat, Receiver, ReturnType,
+    Signature, Token, Visibility,
 };
 
 use crate::common::type_ref;
@@ -13,6 +13,13 @@ use crate::common::type_ref;
 enum Member {
     Signal,
     Slot,
+}
+
+/// One harvested `#[signal]`: its descriptor, payload type, and const name.
+struct SignalInfo {
+    descriptor: TokenStream,
+    const_ident: Ident,
+    args_ty: TokenStream,
 }
 
 /// A bodyless impl method (`fn f(&self);`), which syn reports as `Verbatim`.
@@ -55,19 +62,42 @@ pub fn expand(mut item: ItemImpl) -> Result<TokenStream, Error> {
         };
         match take_member_attr(method)? {
             Some(Member::Signal) => signals.push(signal_descriptor(method)?),
-            Some(Member::Slot) => slots.push(slot_descriptor(method)?),
+            Some(Member::Slot) => slots.push(slot_descriptor(method, &item.self_ty)?),
             None => {}
         }
     }
 
     let self_ty = &item.self_ty;
+    let signal_descriptors = signals.iter().map(|s| s.descriptor.clone());
+    let slot_descriptors = slots.iter().map(|(descriptor, _)| descriptor.clone());
+    let mut consts = TokenStream::new();
+    for (index, signal) in signals.iter().enumerate() {
+        let ident = &signal.const_ident;
+        let args_ty = &signal.args_ty;
+        let doc = format!(
+            "Signal token; use `Hub::emit(handle, Self::{ident}, args)`."
+        );
+        let index = index as u32;
+        consts.extend(quote! {
+            #[doc = #doc]
+            pub const #ident: ::rt_core::signal::SignalId<#self_ty, #args_ty> =
+                ::rt_core::signal::SignalId::new(#index);
+        });
+    }
+    for (_, adapter) in &slots {
+        consts.extend(adapter.clone());
+    }
     Ok(quote! {
         #item
 
         #[automatically_derived]
         impl ::rt_core::meta::ObjectInputs for #self_ty {
-            const SIGNALS: &'static [::rt_core::meta::SignalDescriptor] = &[#(#signals),*];
-            const SLOTS: &'static [::rt_core::meta::SlotDescriptor] = &[#(#slots),*];
+            const SIGNALS: &'static [::rt_core::meta::SignalDescriptor] = &[#(#signal_descriptors),*];
+            const SLOTS: &'static [::rt_core::meta::SlotDescriptor] = &[#(#slot_descriptors),*];
+        }
+
+        impl #self_ty {
+            #consts
         }
     })
 }
@@ -168,7 +198,7 @@ fn validate_signature(sig: &Signature, what: &str) -> Result<Vec<TokenStream>, E
     Ok(args)
 }
 
-fn signal_descriptor(method: &mut ImplItemFn) -> Result<TokenStream, Error> {
+fn signal_descriptor(method: &mut ImplItemFn) -> Result<SignalInfo, Error> {
     let sig = &method.sig;
     if sig
         .receiver()
@@ -187,22 +217,42 @@ fn signal_descriptor(method: &mut ImplItemFn) -> Result<TokenStream, Error> {
     }
     let args = validate_signature(sig, "signals")?;
     let name = sig.ident.to_string();
-    // declaration bodies (if any) are replaced; emission lands with the signal system ticket
+    let const_ident = Ident::new(&name.to_uppercase(), sig.ident.span());
+    let arg_tys: Vec<_> = sig
+        .inputs
+        .iter()
+        .filter_map(|input| match input {
+            FnArg::Typed(arg) => Some((*arg.ty).clone()),
+            _ => None,
+        })
+        .collect();
+    let args_ty = match arg_tys.len() {
+        0 => quote!(()),
+        1 => quote!(#(#arg_tys)*),
+        _ => quote!((#(#arg_tys),*)),
+    };
     method.block = syn::parse_quote!({
-        ::core::unimplemented!("rt: signal emission lands with the signal system ticket")
+        ::core::panic!("rt: emit through Hub::emit(handle, Self::#const_ident, args)")
     });
     method
         .attrs
         .push(syn::parse_quote!(#[allow(unused_variables)]));
-    Ok(quote! {
-        ::rt_core::meta::SignalDescriptor {
-            name: #name,
-            args: &[#(#args),*],
-        }
+    Ok(SignalInfo {
+        descriptor: quote! {
+            ::rt_core::meta::SignalDescriptor {
+                name: #name,
+                args: &[#(#args),*],
+            }
+        },
+        const_ident,
+        args_ty,
     })
 }
 
-fn slot_descriptor(method: &ImplItemFn) -> Result<TokenStream, Error> {
+fn slot_descriptor(
+    method: &ImplItemFn,
+    self_ty: &syn::Type,
+) -> Result<(TokenStream, TokenStream), Error> {
     let sig = &method.sig;
     let args = validate_signature(sig, "slots")?;
     let ret = match &sig.output {
@@ -213,11 +263,42 @@ fn slot_descriptor(method: &ImplItemFn) -> Result<TokenStream, Error> {
         ReturnType::Type(_, ty) => type_ref(ty),
     };
     let name = sig.ident.to_string();
-    Ok(quote! {
+    let ident = &sig.ident;
+    let arg_tys: Vec<_> = sig
+        .inputs
+        .iter()
+        .filter_map(|input| match input {
+            FnArg::Typed(arg) => Some((*arg.ty).clone()),
+            _ => None,
+        })
+        .collect();
+    // Adapters match a signal's payload arity (unit / tuple) so every slot
+    // fits `fn(&mut Recv, Args)`; one-argument methods are used as-is.
+    let adapter_name = Ident::new(&format!("{ident}_slot"), ident.span());
+    let adapter = match arg_tys.len() {
+        0 => quote! {
+            #[doc = "Slot adapter: takes the unit signal payload."]
+            pub fn #adapter_name(recv: &mut #self_ty, _args: ()) {
+                recv.#ident();
+            }
+        },
+        1 => quote! {},
+        _ => {
+            let indices: Vec<_> = (0..arg_tys.len()).map(syn::Index::from).collect();
+            quote! {
+                #[doc = "Slot adapter: takes the signal payload as a tuple."]
+                pub fn #adapter_name(recv: &mut #self_ty, args: (#(#arg_tys),*)) {
+                    recv.#ident(#(args.#indices),*);
+                }
+            }
+        }
+    };
+    let descriptor = quote! {
         ::rt_core::meta::SlotDescriptor {
             name: #name,
             args: &[#(#args),*],
             ret: #ret,
         }
-    })
+    };
+    Ok((descriptor, adapter))
 }
