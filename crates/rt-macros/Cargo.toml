@@ -1,0 +1,9 @@
+[package]
+name = "rt-macros"
+description = "Proc macros for RT: #[derive(Object)] with #[signal]/#[slot]/#[property]"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+proc-macro = true

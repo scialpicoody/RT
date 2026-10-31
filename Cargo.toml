@@ -1,0 +1,18 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/rt-core",
+    "crates/rt-macros",
+    "crates/rt-app",
+    "crates/rt-gui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+rt-core = { path = "crates/rt-core" }
+rt-macros = { path = "crates/rt-macros" }
+rt-app = { path = "crates/rt-app" }
