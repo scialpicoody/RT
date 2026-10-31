@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace --all-targets
+      - name: Test
+        run: cargo test --workspace
+
+  dependency-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enforce ADR 0006 (rt-core zero third-party; rt-app std-only)
+        run: |
+          set -eu
+          deps() { sed -n '/^\[dependencies\]/,/^\[/p' "$1" | grep -E '^[a-zA-Z0-9_-]+' | cut -d' ' -f1; }
+          bad=$(deps crates/rt-core/Cargo.toml | grep -v '^rt-macros$' || true)
+          if [ -n "$bad" ]; then echo "rt-core has forbidden deps: $bad"; exit 1; fi
+          bad=$(deps crates/rt-app/Cargo.toml | grep -v '^rt-core$' || true)
+          if [ -n "$bad" ]; then echo "rt-app has forbidden deps: $bad"; exit 1; fi
+          echo "Dependency policy holds."
