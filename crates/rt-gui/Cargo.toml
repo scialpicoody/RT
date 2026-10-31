@@ -8,3 +8,6 @@ license.workspace = true
 [dependencies]
 rt-core.workspace = true
 rt-app.workspace = true
+winit = "0.30"
+softbuffer = "0.4"
+embedded-graphics = "0.8"
