@@ -16,6 +16,7 @@
 #![forbid(unsafe_code)]
 
 pub mod meta;
+pub mod audit;
 pub mod handle;
 pub mod property;
 pub mod registry;
@@ -25,6 +26,7 @@ pub use handle::{ConnectionId, Handle};
 pub use meta::{
     MetaObject, Object, ObjectInputs, PropertyDescriptor, SignalDescriptor, SlotDescriptor, TypeRef,
 };
+pub use audit::TraceEvent;
 pub use property::Property;
 pub use registry::{Registry, RegistryBuilder};
 pub use rt_macros::{Object, object_impl};

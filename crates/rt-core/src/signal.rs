@@ -8,6 +8,7 @@ use core::any::{Any, TypeId};
 use core::marker::PhantomData;
 use std::rc::Rc;
 
+use crate::audit::TraceEvent;
 use crate::handle::{ConnectionId, Handle};
 use crate::property::{CloneAny, PropertyInputs};
 use crate::Object;
@@ -72,6 +73,7 @@ struct Delivery {
     receiver: Handle,
     call: ErasedCall,
     args: Box<dyn Any>,
+    signal_index: u32,
 }
 
 enum ObjState {
@@ -115,6 +117,7 @@ pub struct Hub {
     connections: Vec<ConnSlot>,
     connection_free: Vec<u32>,
     queue: Vec<Delivery>,
+    trace: Option<Box<dyn Fn(TraceEvent)>>,
 }
 
 impl Default for Hub {
@@ -131,6 +134,23 @@ impl Hub {
             connections: Vec::new(),
             connection_free: Vec::new(),
             queue: Vec::new(),
+            trace: None,
+        }
+    }
+
+    /// Install the audit trace callback; see [`TraceEvent`]. Pass-through
+    /// pluggable observation, no formatting or filtering inside core.
+    pub fn set_trace(&mut self, f: impl Fn(TraceEvent) + 'static) {
+        self.trace = Some(Box::new(f));
+    }
+
+    pub fn clear_trace(&mut self) {
+        self.trace = None;
+    }
+
+    fn trace(&self, event: TraceEvent) {
+        if let Some(f) = &self.trace {
+            f(event);
         }
     }
 
@@ -217,6 +237,7 @@ impl Hub {
         slot.state = ObjState::Empty;
         self.object_free.push(handle.index);
 
+        let mut removed = 0;
         for (index, conn) in self.connections.iter_mut().enumerate() {
             if let ConnState::Occupied(c) = &conn.state
                 && (c.emitter == handle || c.receiver == handle)
@@ -224,8 +245,13 @@ impl Hub {
                 conn.generation += 1;
                 conn.state = ConnState::Empty;
                 self.connection_free.push(index as u32);
+                removed += 1;
             }
         }
+        self.trace(TraceEvent::Destroyed {
+            object: handle,
+            connections_removed: removed,
+        });
         true
     }
 
@@ -307,10 +333,16 @@ impl Hub {
             Some(index) => {
                 let slot = &mut self.connections[index as usize];
                 slot.state = ConnState::Occupied(conn);
-                ConnectionId {
+                let id = ConnectionId {
                     index,
                     generation: slot.generation,
-                }
+                };
+                self.trace(TraceEvent::Connected {
+                    emitter,
+                    receiver,
+                    signal_index: key.1,
+                });
+                id
             }
             None => {
                 let index = self.connections.len() as u32;
@@ -318,10 +350,16 @@ impl Hub {
                     generation: 0,
                     state: ConnState::Occupied(conn),
                 });
-                ConnectionId {
+                let id = ConnectionId {
                     index,
                     generation: 0,
-                }
+                };
+                self.trace(TraceEvent::Connected {
+                    emitter,
+                    receiver,
+                    signal_index: key.1,
+                });
+                id
             }
         }
     }
@@ -338,6 +376,7 @@ impl Hub {
         slot.generation += 1;
         slot.state = ConnState::Empty;
         self.connection_free.push(id.index);
+        self.trace(TraceEvent::Disconnected { id });
         true
     }
 
@@ -373,6 +412,7 @@ impl Hub {
                         receiver: conn.receiver,
                         call: conn.call.clone(),
                         args: Box::new(args.clone()),
+                        signal_index: key.1,
                     });
                 }
             }
@@ -380,8 +420,22 @@ impl Hub {
         for (receiver, call) in pending_direct {
             if let Some(value) = self.any_mut(receiver) {
                 call(&mut **value, Box::new(args.clone()));
+                self.trace(TraceEvent::Delivered {
+                    receiver,
+                    signal_index: key.1,
+                });
+            } else {
+                self.trace(TraceEvent::DroppedStale {
+                    receiver,
+                    signal_index: key.1,
+                });
             }
         }
+        self.trace(TraceEvent::Emitted {
+            emitter,
+            signal_index: key.1,
+            reached,
+        });
         reached
     }
 
@@ -425,6 +479,15 @@ impl Hub {
                 if let Some(value) = self.any_mut(receiver) {
                     call(&mut **value, args);
                     delivered += 1;
+                    self.trace(TraceEvent::Delivered {
+                        receiver,
+                        signal_index: key.1,
+                    });
+                } else {
+                    self.trace(TraceEvent::DroppedStale {
+                        receiver,
+                        signal_index: key.1,
+                    });
                 }
             }
         }
@@ -433,6 +496,15 @@ impl Hub {
             if let Some(value) = self.any_mut(delivery.receiver) {
                 (delivery.call)(&mut **value, delivery.args);
                 delivered += 1;
+                self.trace(TraceEvent::Delivered {
+                    receiver: delivery.receiver,
+                    signal_index: delivery.signal_index,
+                });
+            } else {
+                self.trace(TraceEvent::DroppedStale {
+                    receiver: delivery.receiver,
+                    signal_index: delivery.signal_index,
+                });
             }
         }
         delivered
