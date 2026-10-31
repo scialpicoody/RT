@@ -16,3 +16,6 @@ license = "MIT OR Apache-2.0"
 rt-core = { path = "crates/rt-core" }
 rt-macros = { path = "crates/rt-macros" }
 rt-app = { path = "crates/rt-app" }
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
