@@ -17,6 +17,7 @@
 
 pub mod meta;
 pub mod handle;
+pub mod property;
 pub mod registry;
 pub mod signal;
 
@@ -24,6 +25,7 @@ pub use handle::{ConnectionId, Handle};
 pub use meta::{
     MetaObject, Object, ObjectInputs, PropertyDescriptor, SignalDescriptor, SlotDescriptor, TypeRef,
 };
+pub use property::Property;
 pub use registry::{Registry, RegistryBuilder};
 pub use rt_macros::{Object, object_impl};
 pub use signal::{Hub, SignalId};

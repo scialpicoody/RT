@@ -9,6 +9,7 @@ use core::marker::PhantomData;
 use std::rc::Rc;
 
 use crate::handle::{ConnectionId, Handle};
+use crate::property::{CloneAny, PropertyInputs};
 use crate::Object;
 
 /// Compile-time-typed signal token: ties a signal to its owner type and
@@ -75,7 +76,18 @@ struct Delivery {
 
 enum ObjState {
     Empty,
-    Occupied { type_id: TypeId, value: Box<dyn Any> },
+    Occupied {
+        type_id: TypeId,
+        props: PropsShim,
+        value: Box<dyn Any>,
+    },
+}
+
+/// Monomorphized accessor from the erased value to its property walker.
+type PropsShim = fn(&mut dyn Any) -> Option<&mut dyn PropertyInputs>;
+
+fn props_shim<T: PropertyInputs + 'static>(any: &mut dyn Any) -> Option<&mut dyn PropertyInputs> {
+    any.downcast_mut::<T>().map(|t| t as &mut dyn PropertyInputs)
 }
 
 struct ObjSlot {
@@ -125,11 +137,16 @@ impl Hub {
     /// Store an object; returns its [`Handle`].
     pub fn insert<T: Object + 'static>(&mut self, value: T) -> Handle {
         let type_id = TypeId::of::<T>();
+        let props: PropsShim = props_shim::<T>;
         let value: Box<dyn Any> = Box::new(value);
         match self.object_free.pop() {
             Some(index) => {
                 let slot = &mut self.objects[index as usize];
-                slot.state = ObjState::Occupied { type_id, value };
+                slot.state = ObjState::Occupied {
+                    type_id,
+                    props,
+                    value,
+                };
                 Handle {
                     index,
                     generation: slot.generation,
@@ -139,7 +156,11 @@ impl Hub {
                 let index = self.objects.len() as u32;
                 self.objects.push(ObjSlot {
                     generation: 0,
-                    state: ObjState::Occupied { type_id, value },
+                    state: ObjState::Occupied {
+                        type_id,
+                        props,
+                        value,
+                    },
                 });
                 Handle {
                     index,
@@ -364,10 +385,50 @@ impl Hub {
         reached
     }
 
-    /// Deliver every queued emission in FIFO order; stale receivers are
-    /// dropped. Returns the number of deliveries made.
+    /// Deliver everything pending, deterministically: first dirty-property
+    /// changes are evaluated and delivered (object insertion order, then
+    /// declaration order, then connection order), then the queued emissions
+    /// in FIFO order. Stale receivers are dropped. Returns deliveries made.
     pub fn flush(&mut self) -> usize {
+        let mut changes: Vec<(Handle, SignalKey, Box<dyn CloneAny>)> = Vec::new();
+        for (index, slot) in self.objects.iter_mut().enumerate() {
+            if let ObjState::Occupied {
+                type_id,
+                props,
+                value,
+            } = &mut slot.state
+            {
+                let handle = Handle {
+                    index: index as u32,
+                    generation: slot.generation,
+                };
+                if let Some(inputs) = props(&mut **value) {
+                    for (signal_index, payload) in inputs.take_dirty_changes() {
+                        changes.push((handle, (*type_id, signal_index), payload));
+                    }
+                }
+            }
+        }
+
         let mut delivered = 0;
+        for (emitter, key, payload) in changes {
+            let mut to_deliver: Vec<(Handle, ErasedCall, Box<dyn Any>)> = Vec::new();
+            for slot in &self.connections {
+                let ConnState::Occupied(conn) = &slot.state else {
+                    continue;
+                };
+                if conn.key == key && conn.emitter == emitter {
+                    to_deliver.push((conn.receiver, conn.call.clone(), payload.clone_any()));
+                }
+            }
+            for (receiver, call, args) in to_deliver {
+                if let Some(value) = self.any_mut(receiver) {
+                    call(&mut **value, args);
+                    delivered += 1;
+                }
+            }
+        }
+
         for delivery in std::mem::take(&mut self.queue) {
             if let Some(value) = self.any_mut(delivery.receiver) {
                 (delivery.call)(&mut **value, delivery.args);

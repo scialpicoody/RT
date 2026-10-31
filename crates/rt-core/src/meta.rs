@@ -74,7 +74,7 @@ impl MetaObject {
 /// assert_eq!(meta.signals[0].name, "pressed");
 /// assert_eq!(meta.slots[0].name, "release");
 /// ```
-pub trait Object {
+pub trait Object: crate::property::PropertyInputs {
     /// The static description of this kind of object; no runtime allocation.
     fn meta() -> &'static MetaObject;
 }

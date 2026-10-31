@@ -3,7 +3,7 @@
 
 #![allow(dead_code)]
 
-use rt_core::{Object, PropertyDescriptor, SignalDescriptor, SlotDescriptor, TypeRef, object_impl};
+use rt_core::{Object, Property, PropertyDescriptor, SignalDescriptor, SlotDescriptor, TypeRef, object_impl};
 use std::any::TypeId;
 
 #[derive(Object)]
@@ -27,19 +27,19 @@ fn bare_type_has_minimal_meta() {
 #[derive(Object)]
 struct Gauge {
     #[property]
-    value: i32,
+    value: Property<i32>,
 }
 
 #[object_impl]
 impl Gauge {
     #[signal]
-    fn value_changed(&self, new_value: i32);
+    fn surged(&self, new_value: i32);
 
     #[signal]
     fn stuck(&self);
 
     fn helper(&self, delta: i32) -> i32 {
-        delta + self.value
+        delta + self.value()
     }
 }
 
@@ -47,7 +47,7 @@ impl Gauge {
 fn signal_descriptors_match_declarations() {
     static EXPECTED: [SignalDescriptor; 2] = [
         SignalDescriptor {
-            name: "value_changed",
+            name: "surged",
             args: &[TypeRef {
                 name: "i32",
                 id: TypeId::of::<i32>(),
@@ -65,13 +65,13 @@ fn signal_descriptors_match_declarations() {
 impl Model {
     #[slot]
     fn clear(&mut self) {
-        self.count = 0;
-        self.label.clear();
+        self.count.set(0);
+        self.label.set(String::new());
     }
 
     #[slot]
     fn describe(&self, prefix: &str) -> String {
-        format!("{prefix}{}", self.label)
+        format!("{prefix}{}", self.label())
     }
 }
 
@@ -104,13 +104,13 @@ fn slot_descriptors_match_methods() {
 #[test]
 fn slot_bodies_still_run() {
     let mut model = Model {
-        count: 7,
-        label: String::from("red"),
+        count: Property::new(7),
+        label: Property::new(String::from("red")),
         internal: 1,
     };
     assert_eq!(model.describe("color: "), "color: red");
     model.clear();
-    assert_eq!(model.count, 0);
+    assert_eq!(model.count(), 0);
     assert_eq!(model.describe("color: "), "color: ");
 }
 
@@ -124,9 +124,9 @@ fn plain_methods_are_not_described() {
 #[derive(Object)]
 struct Model {
     #[property]
-    count: i32,
+    count: Property<i32>,
     #[property]
-    label: String,
+    label: Property<String>,
     internal: u8,
 }
 
@@ -163,7 +163,7 @@ impl Element {}
 #[object(parent = Element)]
 struct Button {
     #[property]
-    pressed: bool,
+    pressed: Property<bool>,
 }
 
 #[object_impl]
