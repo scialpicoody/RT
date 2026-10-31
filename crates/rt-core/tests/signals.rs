@@ -5,9 +5,7 @@
 use rt_core::{Handle, Hub, Object, object_impl};
 
 #[derive(Object)]
-struct Sender {
-    count: u32,
-}
+struct Sender;
 #[object_impl]
 impl Sender {
     #[signal]
@@ -68,7 +66,7 @@ fn multi_arg_signal_uses_tuple_payload_and_slot_adapter() {
 
 fn setup() -> (Hub, Handle, Handle, Handle) {
     let mut hub = Hub::new();
-    let s = hub.insert(Sender { count: 0 });
+    let s = hub.insert(Sender);
     let r1 = hub.insert(Receiver { log: vec![], hits: vec![] });
     let r2 = hub.insert(Receiver { log: vec![], hits: vec![] });
     (hub, s, r1, r2)
