@@ -86,6 +86,7 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream, Error> {
                     signals: <#ident as ::rt_core::meta::ObjectInputs>::SIGNALS,
                     slots: <#ident as ::rt_core::meta::ObjectInputs>::SLOTS,
                     properties: &[#(#descriptors),*],
+                    slot_invokers: <#ident as ::rt_core::meta::ObjectInputs>::SLOT_INVOKERS,
                 };
                 &META
             }

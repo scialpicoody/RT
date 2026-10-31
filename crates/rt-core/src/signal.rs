@@ -48,7 +48,7 @@ type SignalKey = (TypeId, u32);
 /// Type-erased slot invocation. The `Rc` carries only the plain fn pointer
 /// the API admitted — no user state — and the single-threaded core (ADR 0003)
 /// needs nothing stronger.
-type ErasedCall = Rc<dyn Fn(&mut dyn Any, Box<dyn Any>)>;
+pub(crate) type ErasedCall = Rc<dyn Fn(&mut dyn Any, Box<dyn Any>)>;
 
 /// Erases a typed method slot into the heterogeneous delivery call.
 fn erase_call<Recv: 'static, Args: 'static>(slot: fn(&mut Recv, Args)) -> ErasedCall {
@@ -215,12 +215,17 @@ impl Hub {
         }
     }
 
-    fn type_of(&self, handle: Handle) -> Option<TypeId> {
+    pub(crate) fn type_of(&self, handle: Handle) -> Option<TypeId> {
         let slot = self.objects.get(handle.index as usize)?;
         match (&slot.state, handle.generation == slot.generation) {
             (ObjState::Occupied { type_id, .. }, true) => Some(*type_id),
             _ => None,
         }
+    }
+
+    #[cfg(feature = "dynamic-invoke")]
+    pub(crate) fn trace_event(&self, event: TraceEvent) {
+        self.trace(event);
     }
 
     /// Destroy an object: bumps its generation, drops its value, and removes
@@ -304,7 +309,7 @@ impl Hub {
         )
     }
 
-    fn store_connection(
+    pub(crate) fn store_connection(
         &mut self,
         emitter: Handle,
         key: SignalKey,
@@ -512,5 +517,58 @@ impl Hub {
 
     pub fn pending(&self) -> usize {
         self.queue.len()
+    }
+
+    /// By-name path (feature `dynamic-invoke`): emit with an erased payload
+    /// against a pre-resolved key. Mirrors [`Hub::emit`] without generics.
+    #[cfg(feature = "dynamic-invoke")]
+    pub(crate) fn emit_erased(
+        &mut self,
+        emitter: Handle,
+        key: SignalKey,
+        payload: Box<dyn crate::property::CloneAny>,
+    ) -> usize {
+        if self.type_of(emitter) != Some(key.0) {
+            return 0;
+        }
+        let mut reached = 0;
+        let mut pending_direct: Vec<(Handle, ErasedCall, Box<dyn Any>)> = Vec::new();
+        for slot in &self.connections {
+            if let ConnState::Occupied(conn) = &slot.state
+                && conn.key == key
+                && conn.emitter == emitter
+            {
+                reached += 1;
+                if conn.direct {
+                    pending_direct.push((
+                        conn.receiver,
+                        conn.call.clone(),
+                        payload.clone_any(),
+                    ));
+                } else {
+                    self.queue.push(Delivery {
+                        receiver: conn.receiver,
+                        call: conn.call.clone(),
+                        args: payload.clone_any(),
+                        signal_index: key.1,
+                    });
+                }
+            }
+        }
+        for (receiver, call, args) in pending_direct {
+            if let Some(value) = self.any_mut(receiver) {
+                call(&mut **value, args);
+                self.trace(TraceEvent::Delivered {
+                    receiver,
+                    signal_index: key.1,
+                });
+            }
+        }
+        self.trace(TraceEvent::Emitted {
+            emitter,
+            signal_index: key.1,
+            reached,
+        });
+        reached
     }
 }

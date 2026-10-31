@@ -17,6 +17,8 @@
 
 pub mod meta;
 pub mod audit;
+#[cfg(feature = "dynamic-invoke")]
+pub mod dynamic;
 pub mod handle;
 pub mod property;
 pub mod registry;

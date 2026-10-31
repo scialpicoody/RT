@@ -69,7 +69,8 @@ pub fn expand(mut item: ItemImpl) -> Result<TokenStream, Error> {
 
     let self_ty = &item.self_ty;
     let signal_descriptors = signals.iter().map(|s| s.descriptor.clone());
-    let slot_descriptors = slots.iter().map(|(descriptor, _)| descriptor.clone());
+    let slot_descriptors = slots.iter().map(|(descriptor, _, _)| descriptor.clone());
+    let slot_invoker_entries = slots.iter().map(|(_, _, entry)| entry.clone());
     let mut consts = TokenStream::new();
     for (index, signal) in signals.iter().enumerate() {
         let ident = &signal.const_ident;
@@ -84,8 +85,8 @@ pub fn expand(mut item: ItemImpl) -> Result<TokenStream, Error> {
                 ::rt_core::signal::SignalId::new(#index);
         });
     }
-    for (_, adapter) in &slots {
-        consts.extend(adapter.clone());
+    for (_, generated, _) in &slots {
+        consts.extend(generated.clone());
     }
     Ok(quote! {
         #item
@@ -94,6 +95,7 @@ pub fn expand(mut item: ItemImpl) -> Result<TokenStream, Error> {
         impl ::rt_core::meta::ObjectInputs for #self_ty {
             const SIGNALS: &'static [::rt_core::meta::SignalDescriptor] = &[#(#signal_descriptors),*];
             const SLOTS: &'static [::rt_core::meta::SlotDescriptor] = &[#(#slot_descriptors),*];
+            const SLOT_INVOKERS: &'static [(&'static str, ::rt_core::meta::SlotInvoker)] = &[#(#slot_invoker_entries),*];
         }
 
         impl #self_ty {
@@ -252,7 +254,7 @@ fn signal_descriptor(method: &mut ImplItemFn) -> Result<SignalInfo, Error> {
 fn slot_descriptor(
     method: &ImplItemFn,
     self_ty: &syn::Type,
-) -> Result<(TokenStream, TokenStream), Error> {
+) -> Result<(TokenStream, TokenStream, TokenStream), Error> {
     let sig = &method.sig;
     let args = validate_signature(sig, "slots")?;
     let ret = match &sig.output {
@@ -272,9 +274,16 @@ fn slot_descriptor(
             _ => None,
         })
         .collect();
-    // Adapters match a signal's payload arity (unit / tuple) so every slot
-    // fits `fn(&mut Recv, Args)`; one-argument methods are used as-is.
+    // Adapters match a signal's payload arity (unit / single / tuple) so
+    // every slot fits `fn(&mut Recv, Args)`; wrappers erase receiver and
+    // payload for the by-name invoker table.
     let adapter_name = Ident::new(&format!("{ident}_slot"), ident.span());
+    let wrapper_name = Ident::new(&format!("__slot_invoke_{ident}"), ident.span());
+    let payload_ty = match arg_tys.len() {
+        0 => quote!(()),
+        1 => quote!(#(#arg_tys)*),
+        _ => quote!((#(#arg_tys),*)),
+    };
     let adapter = match arg_tys.len() {
         0 => quote! {
             #[doc = "Slot adapter: takes the unit signal payload."]
@@ -282,7 +291,12 @@ fn slot_descriptor(
                 recv.#ident();
             }
         },
-        1 => quote! {},
+        1 => quote! {
+            #[doc = "Slot adapter: takes the signal payload."]
+            pub fn #adapter_name(recv: &mut #self_ty, arg: #(#arg_tys)*) {
+                recv.#ident(arg);
+            }
+        },
         _ => {
             let indices: Vec<_> = (0..arg_tys.len()).map(syn::Index::from).collect();
             quote! {
@@ -293,6 +307,22 @@ fn slot_descriptor(
             }
         }
     };
+    let wrapper = quote! {
+        #[doc = "By-name invoker (feature `dynamic-invoke`); not typed API."]
+        #[doc(hidden)]
+        pub fn #wrapper_name(
+            recv: &mut dyn ::core::any::Any,
+            boxed: ::std::boxed::Box<dyn ::core::any::Any>,
+        ) {
+            let recv = recv
+                .downcast_mut::<#self_ty>()
+                .expect("rt: receiver type mismatch");
+            let arg = *boxed
+                .downcast::<#payload_ty>()
+                .expect("rt: by-name payload mismatch");
+            Self::#adapter_name(recv, arg);
+        }
+    };
     let descriptor = quote! {
         ::rt_core::meta::SlotDescriptor {
             name: #name,
@@ -300,5 +330,6 @@ fn slot_descriptor(
             ret: #ret,
         }
     };
-    Ok((descriptor, adapter))
+    let entry = quote! { (#name, Self::#wrapper_name) };
+    Ok((descriptor, quote! { #adapter #wrapper }, entry))
 }

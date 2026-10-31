@@ -7,3 +7,8 @@ license.workspace = true
 
 [dependencies]
 rt-macros.workspace = true
+
+[features]
+# By-name connect/emit: single entry point, Result returns, traced lookups
+# (ADR 0005). Default-off: safety-critical builds cannot contain it.
+dynamic-invoke = []
