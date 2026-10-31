@@ -27,7 +27,7 @@ jobs:
       - name: Enforce ADR 0006 (rt-core zero third-party; rt-app std-only)
         run: |
           set -eu
-          deps() { sed -n '/^\[dependencies\]/,/^\[/p' "$1" | grep -E '^[a-zA-Z0-9_-]+' | cut -d' ' -f1; }
+          deps() { sed -n '/^\[dependencies\]/,/^\[/p' "$1" | grep -E '^[a-zA-Z0-9_-]+' | cut -d' ' -f1 | cut -d'.' -f1; }
           bad=$(deps crates/rt-core/Cargo.toml | grep -v '^rt-macros$' || true)
           if [ -n "$bad" ]; then echo "rt-core has forbidden deps: $bad"; exit 1; fi
           bad=$(deps crates/rt-app/Cargo.toml | grep -v '^rt-core$' || true)
