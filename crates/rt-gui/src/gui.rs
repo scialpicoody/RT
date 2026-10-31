@@ -7,6 +7,8 @@
 //! widget-facing contract below stays the same.
 
 use embedded_graphics::geometry::{Point, Size};
+use embedded_graphics::mono_font::ascii::FONT_8X13;
+use embedded_graphics::text::Text;
 use embedded_graphics::primitives::Rectangle;
 
 use crate::damage::Damage;
@@ -20,6 +22,7 @@ pub struct Gui {
     size: Size,
     frame: Vec<u32>,
     button: Button,
+    label: String,
     damage: Damage,
     clicks: u32,
 }
@@ -37,9 +40,17 @@ impl Gui {
             size,
             frame: vec![0; (width * height) as usize],
             button,
+            label: String::new(),
             damage,
             clicks: 0,
         }
+    }
+
+    /// Status line rendered under the button; setting it invalidates
+    /// everything (basic full repaint).
+    pub fn set_label(&mut self, label: impl Into<String>) {
+        self.label = label.into();
+        self.damage.mark_all(self.size);
     }
 
     /// Feed one translated input event. Returns `true` when it scheduled new
@@ -78,6 +89,21 @@ impl Gui {
         let size = self.size;
         let mut target = BufferTarget::new(&mut self.frame, size);
         self.button.render(&mut target).expect("infallible target");
+        let glyph = FONT_8X13.character_size;
+        let origin = Point::new(
+            self.button.rect().top_left.x,
+            self.button.rect().top_left.y + self.button.rect().size.height as i32 + glyph.height as i32,
+        );
+        use embedded_graphics::mono_font::MonoTextStyle;
+        use embedded_graphics::pixelcolor::Rgb888;
+        use embedded_graphics::prelude::*;
+        Text::new(
+            &self.label,
+            origin,
+            MonoTextStyle::new(&FONT_8X13, Rgb888::new(0x20, 0x20, 0x20)),
+        )
+        .draw(&mut target)
+        .expect("infallible target");
         Some(&self.frame)
     }
 

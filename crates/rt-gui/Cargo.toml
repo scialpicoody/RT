@@ -11,3 +11,7 @@ rt-app.workspace = true
 winit = "0.30"
 softbuffer = "0.4"
 embedded-graphics = "0.8"
+
+[features]
+# Forwards rt-core's by-name path to this crate's examples/tests.
+dynamic-invoke = ["rt-core/dynamic-invoke"]
