@@ -16,6 +16,7 @@ pub mod input;
 pub mod paint;
 pub mod pixel;
 pub mod widget;
+pub mod window;
 
 pub use damage::Damage;
 pub use gui::Gui;
@@ -23,3 +24,4 @@ pub use input::{InputEvent, InputTranslator};
 pub use paint::Painter;
 pub use pixel::{color_to_u32, rgb_to_u32};
 pub use widget::{Button, ButtonOutcome};
+pub use window::{CloseState, Window, WindowEvent, window_event_from_input};
