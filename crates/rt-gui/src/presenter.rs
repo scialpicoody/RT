@@ -183,7 +183,7 @@ impl WindowShell {
     /// Loop-thread input entry: route mouse input through the widget tree
     /// (hit test on post-layout geometry). Returns whether new damage was
     /// scheduled. Window-level events arrive as
-    /// [`WindowMsg::Window`](WindowMsg::Window), not here.
+    /// [`WindowMsg::Window`], not here.
     pub fn handle_input(&mut self, event: InputEvent) -> bool {
         self.gui.handle_input(&event)
     }

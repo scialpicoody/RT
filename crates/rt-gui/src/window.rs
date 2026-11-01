@@ -1,6 +1,7 @@
 //! Window-as-object (spec #16 decision 6, ticket #19): the loop-thread
-//! [`Window`] is a derive-generated RT object registered in the [`Registry`];
-//! platform window events reach it as typed, `Send` [`WindowEvent`] messages.
+//! [`Window`] is a derive-generated RT object registered in the runtime's
+//! `Registry`; platform window events reach it as typed, `Send`
+//! [`WindowEvent`] messages.
 //!
 //! # Contract (ADR 0003)
 //!
@@ -13,8 +14,9 @@
 //!   the cycle, which delivers the [`Window::RESIZED`] and
 //!   [`Window::CLOSE_REQUESTED`] signals and the
 //!   [`Window::SCALE_FACTOR_CHANGED`] property change to connected slots.
-//! - Mouse input stays in [`InputEvent`]; only window-level events (resize,
-//!   scale change, close request) marshal through this protocol.
+//! - Mouse input stays in [`InputEvent`](crate::input::InputEvent); only
+//!   window-level events (resize, scale change, close request) marshal
+//!   through this protocol.
 //!
 //! # Close-confirmation chain
 //!
