@@ -22,6 +22,17 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream, Error> {
         |path| quote!(Some(<#path as ::rt_core::meta::Object>::meta)),
     );
     let properties = property_fields(&input)?;
+    let children = children_fields(&input)?;
+
+    // Owned-children cascade hook: the parent value field's own children
+    // stay reachable through the child's hook, so destroying a child object
+    // also cascades into inherited children.
+    let parent_children = parent_field
+        .as_ref()
+        .map(|field| quote!(out.extend(::rt_core::property::PropertyInputs::child_handles(&self.#field));));
+    let child_takes = children.iter().map(|field| {
+        quote!(out.extend(self.#field.iter().copied());)
+    });
 
     let descriptors = properties.iter().map(|(name, inner)| {
         let ty = type_ref(inner);
@@ -189,6 +200,15 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream, Error> {
                 changes
             }
 
+            fn child_handles(
+                &self,
+            ) -> ::std::vec::Vec<::rt_core::Handle> {
+                let mut out = ::std::vec::Vec::new();
+                #(#child_takes)*
+                #parent_children
+                out
+            }
+
             fn is_dirty(&self, name: &str) -> ::std::option::Option<bool> {
                 match name {
                     #(#dirty_arms)*
@@ -342,6 +362,76 @@ fn last_type_ident(ty: &Type) -> String {
     }
 }
 
+/// `#[object(children)]` fields in declaration order. The field type must be
+/// `Vec<rt_core::Handle>` — the lifecycle cascade (ticket #31) destroys every
+/// handle in the collection depth-first.
+fn children_fields(input: &DeriveInput) -> Result<Vec<Ident>, Error> {
+    let Data::Struct(data) = &input.data else {
+        return Err(Error::new_spanned(
+            input,
+            "#[derive(Object)] requires a struct",
+        ));
+    };
+    let Fields::Named(named) = &data.fields else {
+        return Ok(Vec::new());
+    };
+    let mut children = Vec::new();
+    for field in &named.named {
+        let is_children = field
+            .attrs
+            .iter()
+            .any(|attr| attr.path().is_ident("object"))
+            && {
+                let mut found = false;
+                for attr in field.attrs.iter().filter(|a| a.path().is_ident("object")) {
+                    attr.parse_nested_meta(|meta| {
+                        if meta.path.is_ident("children") {
+                            found = true;
+                            Ok(())
+                        } else {
+                            Err(Error::new_spanned(
+                                meta.path,
+                                "unknown #[object] field item; expected `children`",
+                            ))
+                        }
+                    })?;
+                }
+                found
+            };
+        if !is_children {
+            continue;
+        }
+        if !is_handle_vec(&field.ty) {
+            return Err(Error::new_spanned(
+                &field.ty,
+                "#[object(children)] fields must be Vec<rt_core::Handle>",
+            ));
+        }
+        children.push(field.ident.clone().expect("named field"));
+    }
+    Ok(children)
+}
+
+/// Syntactic check: `Vec<Handle>` (any path spelling ending in `Handle`).
+fn is_handle_vec(ty: &Type) -> bool {
+    let Type::Path(path) = ty else {
+        return false;
+    };
+    let Some(last) = path.path.segments.last() else {
+        return false;
+    };
+    if last.ident != "Vec" {
+        return false;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return false;
+    };
+    match args.args.first() {
+        Some(syn::GenericArgument::Type(inner)) => last_type_ident(inner) == "Handle",
+        _ => false,
+    }
+}
+
 /// `#[property]` fields as `(name, inner type)` in declaration order.
 /// The field type must be `Property<T>`; the descriptor reports `T`.
 fn property_fields(input: &DeriveInput) -> Result<Vec<(Ident, Type)>, Error> {
@@ -434,5 +524,29 @@ mod parent_field_tests {
         )
         .expect_err("ambiguous parent value field");
         assert!(error.to_string().contains("several exist"));
+    }
+
+    #[test]
+    fn children_field_must_be_a_handle_vec() {
+        let error = expand_struct(
+            "#[derive(Object)] struct N { #[object(children)] kids: Vec<u32> }",
+        )
+        .expect_err("non-handle children field");
+        assert!(
+            error
+                .to_string()
+                .contains("#[object(children)] fields must be Vec<rt_core::Handle>")
+        );
+
+        let error = expand_struct("#[derive(Object)] struct N { #[object(children)] kids: u32 }")
+            .expect_err("non-vec children field");
+        assert!(error.to_string().contains("Vec<rt_core::Handle>"));
+    }
+
+    #[test]
+    fn unknown_object_field_item_is_rejected() {
+        let error = expand_struct("#[derive(Object)] struct N { #[object(kids)] v: u32 }")
+            .expect_err("unknown field item");
+        assert!(error.to_string().contains("unknown #[object] field item"));
     }
 }

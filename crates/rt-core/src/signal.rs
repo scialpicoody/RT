@@ -313,16 +313,61 @@ impl Hub {
         self.trace(event);
     }
 
-    /// Destroy an object: bumps its generation, drops its value, and removes
-    /// every connection it takes part in (as emitter or receiver). Queued
-    /// deliveries targeting it are detected stale at flush.
+    /// Destroy an object and its owned children depth-first (ticket #31):
+    /// each object bumps its generation, drops its value, and has every
+    /// connection it takes part in (as emitter or receiver) removed — one
+    /// [`TraceEvent::Destroyed`] per destroyed object, with that object's
+    /// removed-connection count. Queued deliveries targeting any of them are
+    /// detected stale at flush.
+    ///
+    /// Children are read from the still-live parent before its state is
+    /// cleared, then processed LIFO from an explicit worklist — no recursion
+    /// on `&mut self`, so reentrancy is structurally impossible (ADR 0003).
     pub fn destroy(&mut self, handle: Handle) -> bool {
-        let Some(slot) = self.objects.get_mut(handle.index as usize) else {
-            return false;
-        };
-        if handle.generation != slot.generation || matches!(slot.state, ObjState::Empty) {
+        if !self.is_live(handle) {
             return false;
         }
+        let mut worklist = vec![handle];
+        while let Some(current) = worklist.pop() {
+            // Read children while the object is still live; destroying the
+            // parent first would erase the collection that owns them.
+            let children = self.live_children(current);
+            self.destroy_one(current);
+            // Depth-first: the last-declared child (and its whole subtree)
+            // goes before the earlier siblings.
+            worklist.extend(children.into_iter().rev());
+        }
+        true
+    }
+
+    /// Whether `handle` designates a live, occupied object slot.
+    fn is_live(&self, handle: Handle) -> bool {
+        let Some(slot) = self.objects.get(handle.index as usize) else {
+            return false;
+        };
+        handle.generation == slot.generation && matches!(slot.state, ObjState::Occupied { .. })
+    }
+
+    /// The owned children of a live object, via the erased `child_handles`
+    /// hook; empty for stale handles or objects without children fields.
+    fn live_children(&mut self, handle: Handle) -> Vec<Handle> {
+        let slot = self.objects.get_mut(handle.index as usize);
+        let Some(slot) = slot else {
+            return Vec::new();
+        };
+        if handle.generation != slot.generation {
+            return Vec::new();
+        }
+        let ObjState::Occupied { props, value, .. } = &mut slot.state else {
+            return Vec::new();
+        };
+        props(&mut **value).map_or_else(Vec::new, |inputs| inputs.child_handles())
+    }
+
+    /// The single-object destroy: generation bump, drop, connection removal,
+    /// trace. The cascade walks this over the owned-children worklist.
+    fn destroy_one(&mut self, handle: Handle) {
+        let slot = &mut self.objects[handle.index as usize];
         slot.generation += 1;
         slot.state = ObjState::Empty;
         self.object_free.push(handle.index);
@@ -348,7 +393,6 @@ impl Hub {
             object: handle,
             connections_removed: removed,
         });
-        true
     }
 
     /// Connect a signal to a method slot; queued delivery at [`Hub::flush`].
@@ -572,6 +616,9 @@ impl Hub {
             return 0;
         }
         let mut reached = 0;
+        // Allocation hygiene (ticket #31): `Vec::new` is a non-allocating
+        // null pointer — with no direct connections this emit call never
+        // touches the allocator beyond queued deliveries it actually creates.
         let mut pending_direct: Vec<(Handle, ErasedCall)> = Vec::new();
         for slot in &self.connections {
             if let ConnState::Occupied(conn) = &slot.state

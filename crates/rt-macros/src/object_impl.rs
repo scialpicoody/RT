@@ -20,6 +20,10 @@ struct SignalInfo {
     descriptor: TokenStream,
     const_ident: Ident,
     args_ty: TokenStream,
+    /// The signal's method name and argument types, for the typed emit
+    /// helper trait (ticket #33).
+    name: String,
+    arg_tys: Vec<syn::Type>,
 }
 
 /// A bodyless impl method (`fn f(&self);`), which syn reports as `Verbatim`.
@@ -68,6 +72,71 @@ pub fn expand(mut item: ItemImpl) -> Result<TokenStream, Error> {
     }
 
     let self_ty = &item.self_ty;
+    // Typed emit helpers (ticket #33): one extension trait per object type,
+    // implemented for the Hub, so call sites pass plain typed arguments
+    // instead of wrangling the payload tuple. These cover the type's OWN
+    // signals — inherited signals emit through the base type's helper, or
+    // by name on the dynamic-invoke path (the macro cannot see ancestor
+    // descriptors: they are runtime static data, not syntax).
+    // Plain named type only — the helpers are keyed on the type name.
+    let self_ident = match &*item.self_ty {
+        syn::Type::Path(path) if path.qself.is_none() => path.path.get_ident(),
+        _ => None,
+    };
+    let emit_trait = self_ident
+        .and_then(|ident| (!signals.is_empty()).then(|| {
+            let trait_ident = Ident::new(&format!("{ident}Emit"), ident.span());
+            // Signatures for both the trait declaration and the Hub impl;
+            // the bodies live only in the impl, where `self` is `&mut Hub`.
+            let decls = signals.iter().map(|signal| {
+                let (method, sig) = emit_method(signal, ident);
+                let doc = format!("Emit `{ident}::{}` with typed arguments.", signal.name);
+                quote! {
+                    #[doc = #doc]
+                    fn #method #sig;
+                }
+            });
+            let bodies = signals.iter().map(|signal| {
+                let (method, sig) = emit_method(signal, ident);
+                let args_ty = &signal.args_ty;
+                let const_ident = &signal.const_ident;
+                let call_args: Vec<_> = (0..signal.arg_tys.len())
+                    .map(|i| {
+                        let name = Ident::new(&format!("arg{i}"), ident.span());
+                        quote!(#name)
+                    })
+                    .collect();
+                // `(arg0)` for a single payload is a parenthesized
+                // expression, matching the bare single-arg `args_ty`;
+                // a trailing comma would make it a 1-tuple.
+                let payload = (!call_args.is_empty()).then(|| quote!((#(#call_args),*)));
+                let payload = payload.unwrap_or_else(|| quote!(()));
+                quote! {
+                    fn #method #sig {
+                        ::rt_core::signal::Hub::emit::<#self_ty, #args_ty>(
+                            self,
+                            handle,
+                            <#self_ty>::#const_ident,
+                            #payload,
+                        )
+                    }
+                }
+            });
+            quote! {
+                #[doc = concat!("Typed emit helpers for [`", stringify!(#ident), "`] (ticket #33). Covers the type's OWN signals only: inherited signals emit through the base type's helper trait, or by name on the `dynamic-invoke` path — the macro cannot see ancestor descriptors, which are runtime static data.")]
+                #[doc(hidden)]
+                #[automatically_derived]
+                pub trait #trait_ident {
+                    #(#decls)*
+                }
+
+                #[automatically_derived]
+                impl #trait_ident for ::rt_core::signal::Hub {
+                    #(#bodies)*
+                }
+            }
+        }))
+        .unwrap_or_default();
     let signal_descriptors = signals.iter().map(|s| s.descriptor.clone());
     let slot_descriptors = slots.iter().map(|(descriptor, _, _)| descriptor.clone());
     let slot_invoker_entries = slots.iter().map(|(_, _, entry)| entry.clone());
@@ -91,6 +160,8 @@ pub fn expand(mut item: ItemImpl) -> Result<TokenStream, Error> {
     Ok(quote! {
         #item
 
+        #emit_trait
+
         #[automatically_derived]
         impl ::rt_core::meta::ObjectInputs for #self_ty {
             const SIGNALS: &'static [::rt_core::meta::SignalDescriptor] = &[#(#signal_descriptors),*];
@@ -102,6 +173,21 @@ pub fn expand(mut item: ItemImpl) -> Result<TokenStream, Error> {
             #consts
         }
     })
+}
+
+
+/// The shared `emit_<signal>` method signature: name plus
+/// `(&mut self, handle, typed args...) -> usize`.
+fn emit_method(signal: &SignalInfo, span_ident: &Ident) -> (Ident, TokenStream) {
+    let method = Ident::new(&format!("emit_{}", signal.name), span_ident.span());
+    let params = signal.arg_tys.iter().enumerate().map(|(i, ty)| {
+        let name = Ident::new(&format!("arg{i}"), span_ident.span());
+        quote!(, #name: #ty)
+    });
+    (
+        method,
+        quote!((&mut self, handle: ::rt_core::Handle #(#params)*) -> usize),
+    )
 }
 
 /// Re-parses verbatim bodyless methods into `ImplItem::Fn` with empty blocks,
@@ -251,6 +337,8 @@ fn signal_descriptor(method: &mut ImplItemFn) -> Result<SignalInfo, Error> {
         },
         const_ident,
         args_ty,
+        name,
+        arg_tys,
     })
 }
 
@@ -355,4 +443,14 @@ fn slot_descriptor(
     };
     let entry = quote! { (#name, Self::#wrapper_name) };
     Ok((descriptor, quote! { #adapter #wrapper }, entry))
+}
+
+#[cfg(test)]
+mod x_debug {
+    #[test]
+    fn dump() {
+        let item: syn::ItemImpl = syn::parse_str("impl Sender { #[signal] fn ping(&self); }").unwrap();
+        let out = super::expand(item).unwrap();
+        std::fs::write("/tmp/emit_dbg.rs", out.to_string()).unwrap();
+    }
 }

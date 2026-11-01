@@ -73,6 +73,13 @@ impl<T> Property<T> {
 pub trait PropertyInputs {
     fn take_dirty_changes(&mut self) -> Vec<(u32, Box<dyn CloneAny>)>;
 
+    /// The owned-children [`Handle`](crate::Handle)s of this object, in
+    /// declaration order (ticket #31 lifecycle cascade). Default: none —
+    /// only `#[object(children)]` fields override it.
+    fn child_handles(&self) -> Vec<crate::Handle> {
+        Vec::new()
+    }
+
     /// Dirty probe by name: `Some` only when this type has the property;
     /// `None` means "no such property" (treated as not dirty by the binding
     /// engine — covers destroyed or stale dependencies).
