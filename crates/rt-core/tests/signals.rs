@@ -161,3 +161,73 @@ fn slot_index_reuse_detects_stale_handles() {
     assert_eq!(hub.flush(), 1);
     assert_eq!(hub.get::<Receiver>(r1b).unwrap().hits, [3]);
 }
+
+#[test]
+fn signal_to_signal_chain_relays_through_the_fifo() {
+    let mut hub = Hub::new();
+    let a = hub.insert(Sender);
+    let b = hub.insert(Sender);
+    let r = hub.insert(Receiver {
+        log: vec![],
+        hits: vec![],
+    });
+    hub.connect_signal(a, Sender::PING, b, Sender::PING);
+    hub.connect(b, Sender::PING, r, Receiver::on_ping);
+
+    // Emit only queues the source's relay connection; the target re-emits
+    // when the flush reaches it, and that emission queues the downstream
+    // slot, which delivers within the same flush.
+    assert_eq!(hub.emit(a, Sender::PING, 3), 1);
+    assert_eq!(hub.pending(), 1);
+    assert_eq!(hub.flush(), 1);
+    assert_eq!(hub.get::<Receiver>(r).unwrap().hits, [3]);
+    assert_eq!(hub.pending(), 0);
+}
+
+#[test]
+fn relay_chains_fan_out_in_connection_order() {
+    let mut hub = Hub::new();
+    let a = hub.insert(Sender);
+    let b = hub.insert(Sender);
+    let c = hub.insert(Sender);
+    let r = hub.insert(Receiver {
+        log: vec![],
+        hits: vec![],
+    });
+    hub.connect_signal(a, Sender::PING, b, Sender::PING);
+    hub.connect_signal(a, Sender::PING, c, Sender::PING);
+    hub.connect(b, Sender::PING, r, Receiver::on_ping);
+    hub.connect(c, Sender::PING, r, Receiver::on_ping);
+
+    assert_eq!(hub.emit(a, Sender::PING, 7), 2);
+    assert_eq!(hub.flush(), 2);
+    assert_eq!(hub.get::<Receiver>(r).unwrap().hits, [7, 7]);
+}
+
+#[test]
+fn relay_downstream_direct_connections_fire_during_flush() {
+    let mut hub = Hub::new();
+    let a = hub.insert(Sender);
+    let b = hub.insert(Sender);
+    let r = hub.insert(Receiver {
+        log: vec![],
+        hits: vec![],
+    });
+    hub.connect_signal(a, Sender::PING, b, Sender::PING);
+    hub.connect_direct(b, Sender::PING, r, Receiver::on_ping);
+
+    assert_eq!(hub.emit(a, Sender::PING, 9), 1);
+    assert_eq!(hub.flush(), 1);
+    assert_eq!(hub.get::<Receiver>(r).unwrap().hits, [9]);
+    assert_eq!(hub.pending(), 0);
+}
+
+#[test]
+#[should_panic(expected = "rt: signal chain would cycle")]
+fn signal_chains_reject_cycles_at_connect() {
+    let mut hub = Hub::new();
+    let a = hub.insert(Sender);
+    let b = hub.insert(Sender);
+    hub.connect_signal(a, Sender::PING, b, Sender::PING);
+    hub.connect_signal(b, Sender::PING, a, Sender::PING);
+}

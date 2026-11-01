@@ -8,11 +8,19 @@ use core::cell::{Cell, RefCell};
 
 /// A cloneable, type-erased property payload for heterogeneous fanout.
 pub trait CloneAny: Any {
+    /// A copy erased to `Any` — one delivery's worth.
     fn clone_any(&self) -> Box<dyn Any>;
+    /// A copy that stays cloneable — for payloads that must fan out again
+    /// later (relay chains).
+    fn clone_any_boxed(&self) -> Box<dyn CloneAny>;
 }
 
 impl<T: Clone + 'static> CloneAny for T {
     fn clone_any(&self) -> Box<dyn Any> {
+        Box::new(self.clone())
+    }
+
+    fn clone_any_boxed(&self) -> Box<dyn CloneAny> {
         Box::new(self.clone())
     }
 }
@@ -50,10 +58,40 @@ impl<T> Property<T> {
     pub fn take_dirty(&self) -> bool {
         self.dirty.replace(false)
     }
+
+    /// Non-destructive dirty probe: does not clear the mark. The binding
+    /// engine uses it to decide re-evaluation without consuming the change.
+    #[doc(hidden)]
+    pub fn peek_dirty(&self) -> bool {
+        self.dirty.get()
+    }
 }
 
 /// Runtime hook the derive emits: reports each dirty property as
-/// `(signal index, latest value)`, clearing the dirty marks.
+/// `(signal index, latest value)`, clearing the dirty marks, and serves the
+/// erased by-name accessors behind the feature-gated dynamic path.
 pub trait PropertyInputs {
     fn take_dirty_changes(&mut self) -> Vec<(u32, Box<dyn CloneAny>)>;
+
+    /// Dirty probe by name: `Some` only when this type has the property;
+    /// `None` means "no such property" (treated as not dirty by the binding
+    /// engine — covers destroyed or stale dependencies).
+    fn is_dirty(&self, name: &str) -> Option<bool> {
+        let _ = name;
+        None
+    }
+
+    /// Erased by-name read: `None` when this type has no such property.
+    fn get_property(&self, name: &str) -> Option<Box<dyn Any>> {
+        let _ = name;
+        None
+    }
+
+    /// Erased by-name write: hands the value back when this type has no such
+    /// property. A successful write marks the property dirty — notification
+    /// happens at the next flush, like a typed `set`.
+    fn set_property(&mut self, name: &str, value: Box<dyn Any>) -> Result<(), Box<dyn Any>> {
+        let _ = name;
+        Err(value)
+    }
 }

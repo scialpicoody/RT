@@ -107,6 +107,11 @@ impl Gui {
         Some(&self.frame)
     }
 
+    /// Whether any region is dirty (test seam: inspect the damage state).
+    pub fn is_dirty(&self) -> bool {
+        self.damage.is_dirty()
+    }
+
     /// The root button's rect (test seam).
     pub fn button_rect(&self) -> Rectangle {
         self.button.rect()

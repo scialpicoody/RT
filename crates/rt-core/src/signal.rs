@@ -67,6 +67,8 @@ struct Connection {
     receiver: Handle,
     call: ErasedCall,
     direct: bool,
+    /// Signal-to-signal relay target; `None` for method-slot connections.
+    relay: Option<SignalKey>,
 }
 
 struct Delivery {
@@ -74,6 +76,15 @@ struct Delivery {
     call: ErasedCall,
     args: Box<dyn Any>,
     signal_index: u32,
+}
+
+/// A relayed emission waiting for its turn: the target signal re-emits from
+/// the target object with the same payload when the flush reaches it. The
+/// payload stays cloneable so fanout can hand every connection its own copy.
+struct RelayDelivery {
+    emitter: Handle,
+    key: SignalKey,
+    args: Box<dyn CloneAny>,
 }
 
 enum ObjState {
@@ -87,6 +98,61 @@ enum ObjState {
 
 /// Monomorphized accessor from the erased value to its property walker.
 type PropsShim = fn(&mut dyn Any) -> Option<&mut dyn PropertyInputs>;
+
+/// Erased binding compute: reads properties through a [`PropertyRead`]
+/// context and produces the owned, type-erased new value.
+type BindingCompute = Box<dyn Fn(&PropertyRead<'_>) -> Box<dyn CloneAny>>;
+
+/// One registered binding: `name` on `handle` is recomputed from other
+/// properties by `compute` at each flush where `evaluated` is false or any
+/// recorded dependency is dirty. The `Option` around `compute` exists only to
+/// let `evaluate_binding` move the closure out for the call while the entry
+/// stays in place (single-threaded core, so the window is unobservable except
+/// through a panic inside `compute`).
+struct BindingEntry {
+    handle: Handle,
+    name: &'static str,
+    compute: Option<BindingCompute>,
+    deps: Vec<(Handle, &'static str)>,
+    evaluated: bool,
+}
+
+/// Explicit read context handed to a binding's compute function. Reads go
+/// through the by-name erased hooks (ticket #28), and every read records a
+/// dependency; reading a binding that is already being evaluated up the stack
+/// is a cycle and panics.
+pub struct PropertyRead<'a> {
+    hub: core::cell::RefCell<&'a mut Hub>,
+    deps: core::cell::RefCell<&'a mut Vec<(Handle, &'static str)>>,
+    stack: &'a [(Handle, &'static str)],
+}
+
+impl PropertyRead<'_> {
+    /// Read a property as a dependency of the binding under evaluation.
+    ///
+    /// Panics with `"rt: binding cycle through …"` when the read reaches back
+    /// into the active evaluation chain, and with
+    /// `"rt: binding read from stale handle or unknown property"` when the
+    /// handle is dead or no such `T`-typed property exists.
+    pub fn property<T: Clone + 'static>(&self, handle: Handle, name: &'static str) -> T {
+        if self.stack.contains(&(handle, name)) {
+            panic!("rt: binding cycle through {name}");
+        }
+        self.deps.borrow_mut().push((handle, name));
+        let value = self
+            .hub
+            .borrow_mut()
+            .property_inputs(handle)
+            .and_then(|inputs| inputs.get_property(name));
+        match value {
+            Some(any) => match any.downcast::<T>() {
+                Ok(value) => *value,
+                Err(_) => panic!("rt: binding read from stale handle or unknown property"),
+            },
+            None => panic!("rt: binding read from stale handle or unknown property"),
+        }
+    }
+}
 
 fn props_shim<T: PropertyInputs + 'static>(any: &mut dyn Any) -> Option<&mut dyn PropertyInputs> {
     any.downcast_mut::<T>().map(|t| t as &mut dyn PropertyInputs)
@@ -117,6 +183,10 @@ pub struct Hub {
     connections: Vec<ConnSlot>,
     connection_free: Vec<u32>,
     queue: Vec<Delivery>,
+    relay_queue: Vec<RelayDelivery>,
+    /// Property bindings in insertion order — the flush evaluates them in
+    /// exactly this order, before the dirty-property changes phase.
+    bindings: Vec<BindingEntry>,
     trace: Option<Box<dyn Fn(TraceEvent)>>,
 }
 
@@ -134,6 +204,8 @@ impl Hub {
             connections: Vec::new(),
             connection_free: Vec::new(),
             queue: Vec::new(),
+            relay_queue: Vec::new(),
+            bindings: Vec::new(),
             trace: None,
         }
     }
@@ -207,10 +279,23 @@ impl Hub {
         }
     }
 
-    fn any_mut(&mut self, handle: Handle) -> Option<&mut Box<dyn Any>> {
+    pub(crate) fn any_mut(&mut self, handle: Handle) -> Option<&mut Box<dyn Any>> {
         let slot = self.objects.get_mut(handle.index as usize)?;
         match (&mut slot.state, handle.generation == slot.generation) {
             (ObjState::Occupied { value, .. }, true) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// The erased property hook for a live object; the flush step, the
+    /// binding engine and the by-name property path share it.
+    pub(crate) fn property_inputs(
+        &mut self,
+        handle: Handle,
+    ) -> Option<&mut dyn PropertyInputs> {
+        let slot = self.objects.get_mut(handle.index as usize)?;
+        match (&mut slot.state, handle.generation == slot.generation) {
+            (ObjState::Occupied { props, value, .. }, true) => props(&mut **value),
             _ => None,
         }
     }
@@ -241,6 +326,12 @@ impl Hub {
         slot.generation += 1;
         slot.state = ObjState::Empty;
         self.object_free.push(handle.index);
+
+        // A destroyed binding target drops its binding outright. Stale
+        // *dependency* handles are deliberately left alone: `is_dirty`
+        // reports `None` for them, so the binding simply stops
+        // re-evaluating — no dangling state, no panic.
+        self.bindings.retain(|binding| binding.handle != handle);
 
         let mut removed = 0;
         for (index, conn) in self.connections.iter_mut().enumerate() {
@@ -283,6 +374,7 @@ impl Hub {
             TypeId::of::<Recv>(),
             erase_call(slot),
             false,
+            None,
         )
     }
 
@@ -306,9 +398,84 @@ impl Hub {
             TypeId::of::<Recv>(),
             erase_call(slot),
             true,
+            None,
         )
     }
 
+    /// Connect a signal to another signal: when the source delivers, the
+    /// target re-emits from the target object with the same payload. The
+    /// payload types must match (compile-time). A chain that would cycle is
+    /// rejected here — it would loop forever in the deterministic FIFO.
+    /// Panics on stale or mistyped handles, like [`Hub::connect`].
+    pub fn connect_signal<Owner, Args, Target>(
+        &mut self,
+        emitter: Handle,
+        signal: SignalId<Owner, Args>,
+        receiver: Handle,
+        target: SignalId<Target, Args>,
+    ) -> ConnectionId
+    where
+        Owner: Object + 'static,
+        Target: 'static,
+        Args: Clone + 'static,
+    {
+        let source_key = signal.key();
+        let target_key = target.key();
+        // Same signal on the same object would re-emit itself forever; more
+        // generally, a chain cycles when the new edge's target side can
+        // already reach its source side through existing relays.
+        if (receiver == emitter && target_key == source_key)
+            || self.relay_cycle(receiver, target_key, emitter, source_key, 0)
+        {
+            panic!("rt: signal chain would cycle");
+        }
+        self.store_connection(
+            emitter,
+            source_key,
+            receiver,
+            TypeId::of::<Target>(),
+            // Relay connections never invoke a slot; the flush loop reads the
+            // relay target instead. This call is unreachable.
+            Rc::new(|_, _| {}),
+            false,
+            Some(target_key),
+        )
+    }
+
+    /// Whether the relay chain starting at `(emitter, key)` can reach
+    /// `(stop_emitter, stop_key)` through existing relay connections.
+    fn relay_cycle(
+        &self,
+        emitter: Handle,
+        key: SignalKey,
+        stop_emitter: Handle,
+        stop_key: SignalKey,
+        depth: usize,
+    ) -> bool {
+        if depth > self.connections.len() {
+            return true;
+        }
+        for slot in &self.connections {
+            if let ConnState::Occupied(conn) = &slot.state
+                && conn.emitter == emitter
+                && conn.key == key
+                && let Some(next_key) = conn.relay
+            {
+                let next = conn.receiver;
+                if next == stop_emitter && next_key == stop_key {
+                    return true;
+                }
+                if self.relay_cycle(next, next_key, stop_emitter, stop_key, depth + 1) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    // The parameter list mirrors the connection struct; packing into a
+    // struct would just move the same names one level down.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn store_connection(
         &mut self,
         emitter: Handle,
@@ -317,6 +484,7 @@ impl Hub {
         receiver_type: TypeId,
         call: ErasedCall,
         direct: bool,
+        relay: Option<SignalKey>,
     ) -> ConnectionId {
         match self.type_of(emitter) {
             Some(actual) if actual == key.0 => {}
@@ -333,6 +501,7 @@ impl Hub {
             receiver,
             call,
             direct,
+            relay,
         };
         match self.connection_free.pop() {
             Some(index) => {
@@ -410,7 +579,13 @@ impl Hub {
                 && conn.emitter == emitter
             {
                 reached += 1;
-                if conn.direct {
+                if let Some(target_key) = conn.relay {
+                    self.relay_queue.push(RelayDelivery {
+                        emitter: conn.receiver,
+                        key: target_key,
+                        args: Box::new(args.clone()),
+                    });
+                } else if conn.direct {
                     pending_direct.push((conn.receiver, conn.call.clone()));
                 } else {
                     self.queue.push(Delivery {
@@ -444,11 +619,116 @@ impl Hub {
         reached
     }
 
+    /// Bind a property to a function of other properties. A single seed
+    /// evaluation runs immediately, so the target already reads the computed
+    /// value before the next flush; re-evaluation happens in [`Hub::flush`],
+    /// in binding insertion order, before the dirty-property changes phase.
+    ///
+    /// Panics with `"rt: binding cycle through …"` when the seed evaluation
+    /// reads the target itself (or any active ancestor), and with
+    /// `"rt: binding target stale or unknown"` when `handle`/`name` do not
+    /// designate a live property.
+    pub fn bind_property(
+        &mut self,
+        handle: Handle,
+        name: &'static str,
+        compute: impl Fn(&PropertyRead<'_>) -> Box<dyn CloneAny> + 'static,
+    ) {
+        self.bindings.push(BindingEntry {
+            handle,
+            name,
+            compute: Some(Box::new(compute)),
+            deps: Vec::new(),
+            evaluated: false,
+        });
+        let index = self.bindings.len() - 1;
+        self.evaluate_binding(index);
+    }
+
+    /// Evaluate binding `index`: run its compute against a read context that
+    /// records dependencies and rejects cycles, write the result through the
+    /// by-name setter (which marks the target dirty exactly like a typed
+    /// `set`), then record dependencies and trace the event.
+    fn evaluate_binding(&mut self, index: usize) {
+        let handle = self.bindings[index].handle;
+        let name = self.bindings[index].name;
+        let compute = self.bindings[index]
+            .compute
+            .take()
+            .expect("rt: binding compute missing");
+        let stack = vec![(handle, name)];
+        let mut deps = Vec::new();
+
+        let value = {
+            let read = PropertyRead {
+                hub: core::cell::RefCell::new(self),
+                deps: core::cell::RefCell::new(&mut deps),
+                stack: &stack,
+            };
+            (compute)(&read)
+        };
+
+        let failed = match self.property_inputs(handle) {
+            Some(inputs) => inputs.set_property(name, value).is_err(),
+            None => true,
+        };
+        if failed {
+            self.bindings[index].compute = Some(compute);
+            panic!("rt: binding target stale or unknown");
+        }
+
+        let entry = &mut self.bindings[index];
+        entry.compute = Some(compute);
+        entry.deps = deps;
+        entry.evaluated = true;
+        self.trace(TraceEvent::BindingEvaluated {
+            target: handle,
+            property: name,
+        });
+    }
+
     /// Deliver everything pending, deterministically: first dirty-property
     /// changes are evaluated and delivered (object insertion order, then
     /// declaration order, then connection order), then the queued emissions
     /// in FIFO order. Stale receivers are dropped. Returns deliveries made.
     pub fn flush(&mut self) -> usize {
+        // Binding pass, in insertion order, BEFORE the dirty-property changes
+        // phase: a binding write marks its target dirty, so its change joins
+        // the same coalescing/delivery path as a typed `set`. Needs
+        // evaluation iff never evaluated, or any recorded dependency is
+        // dirty; a destroyed/stale dependency reports `None` (not dirty).
+        // Dependency dirty marks are still set here — `take_dirty_changes`
+        // runs below. A dependency set and already flushed in an earlier
+        // cycle reads as not dirty: the binding consumed that change then.
+        for index in 0..self.bindings.len() {
+            let dep_count = self.bindings[index].deps.len();
+            let mut dep_stale = false;
+            let mut dep_dirty = false;
+            let mut d = 0;
+            while d < dep_count {
+                let (dep, name) = self.bindings[index].deps[d];
+                let Some(inputs) = self.property_inputs(dep) else {
+                    // A destroyed/stale dependency can never produce a value
+                    // again — freeze the binding (keeps its last value) so no
+                    // later evaluation reads through the dead handle.
+                    dep_stale = true;
+                    break;
+                };
+                if inputs.is_dirty(name) == Some(true) {
+                    // Keep scanning: staleness anywhere in the dep list wins
+                    // over dirtiness.
+                    dep_dirty = true;
+                }
+                d += 1;
+            }
+            if dep_stale {
+                let entry = &mut self.bindings[index];
+                entry.deps.clear();
+                entry.evaluated = true;
+            } else if !self.bindings[index].evaluated || dep_dirty {
+                self.evaluate_binding(index);
+            }
+        }
         let mut changes: Vec<(Handle, SignalKey, Box<dyn CloneAny>)> = Vec::new();
         for (index, slot) in self.objects.iter_mut().enumerate() {
             if let ObjState::Occupied {
@@ -497,26 +777,98 @@ impl Hub {
             }
         }
 
-        for delivery in std::mem::take(&mut self.queue) {
-            if let Some(value) = self.any_mut(delivery.receiver) {
-                (delivery.call)(&mut **value, delivery.args);
-                delivered += 1;
-                self.trace(TraceEvent::Delivered {
-                    receiver: delivery.receiver,
-                    signal_index: delivery.signal_index,
-                });
-            } else {
-                self.trace(TraceEvent::DroppedStale {
-                    receiver: delivery.receiver,
-                    signal_index: delivery.signal_index,
-                });
+        // Queued emissions in FIFO order; relayed emissions append as they
+        // are processed, so chains deliver breadth-first and every hop keeps
+        // its turn. (Chains are acyclic — rejected at connect time.)
+        while !self.queue.is_empty() || !self.relay_queue.is_empty() {
+            for delivery in std::mem::take(&mut self.queue) {
+                if let Some(value) = self.any_mut(delivery.receiver) {
+                    (delivery.call)(&mut **value, delivery.args);
+                    delivered += 1;
+                    self.trace(TraceEvent::Delivered {
+                        receiver: delivery.receiver,
+                        signal_index: delivery.signal_index,
+                    });
+                } else {
+                    self.trace(TraceEvent::DroppedStale {
+                        receiver: delivery.receiver,
+                        signal_index: delivery.signal_index,
+                    });
+                }
+            }
+            while !self.relay_queue.is_empty() {
+                for relay in std::mem::take(&mut self.relay_queue) {
+                    delivered += self.relay_emit(relay.emitter, relay.key, relay.args);
+                }
             }
         }
         delivered
     }
 
+    /// Fan a relayed emission out to the target signal's connections: queued
+    /// connections append to the delivery FIFO, direct connections fire now
+    /// (counted in the return value), further relays join the relay queue.
+    /// Traces `Emitted` for the target.
+    fn relay_emit(&mut self, emitter: Handle, key: SignalKey, args: Box<dyn CloneAny>) -> usize {
+        if self.type_of(emitter) != Some(key.0) {
+            return 0;
+        }
+        let mut delivered = 0;
+        let mut reached = 0;
+        let mut pending_direct: Vec<(Handle, ErasedCall)> = Vec::new();
+        let mut queued: Vec<Delivery> = Vec::new();
+        let mut relays: Vec<(Handle, SignalKey)> = Vec::new();
+        for slot in &self.connections {
+            if let ConnState::Occupied(conn) = &slot.state
+                && conn.key == key
+                && conn.emitter == emitter
+            {
+                reached += 1;
+                if let Some(target_key) = conn.relay {
+                    relays.push((conn.receiver, target_key));
+                } else if conn.direct {
+                    pending_direct.push((conn.receiver, conn.call.clone()));
+                } else {
+                    queued.push(Delivery {
+                        receiver: conn.receiver,
+                        call: conn.call.clone(),
+                        args: args.clone_any(),
+                        signal_index: key.1,
+                    });
+                }
+            }
+        }
+        for delivery in queued {
+            self.queue.push(delivery);
+        }
+        for (relay_emitter, target_key) in relays {
+            self.relay_emit(relay_emitter, target_key, args.clone_any_boxed());
+        }
+        for (receiver, call) in pending_direct {
+            if let Some(value) = self.any_mut(receiver) {
+                call(&mut **value, args.clone_any());
+                delivered += 1;
+                self.trace(TraceEvent::Delivered {
+                    receiver,
+                    signal_index: key.1,
+                });
+            } else {
+                self.trace(TraceEvent::DroppedStale {
+                    receiver,
+                    signal_index: key.1,
+                });
+            }
+        }
+        self.trace(TraceEvent::Emitted {
+            emitter,
+            signal_index: key.1,
+            reached,
+        });
+        delivered
+    }
+
     pub fn pending(&self) -> usize {
-        self.queue.len()
+        self.queue.len() + self.relay_queue.len()
     }
 
     /// By-name path (feature `dynamic-invoke`): emit with an erased payload
@@ -539,7 +891,13 @@ impl Hub {
                 && conn.emitter == emitter
             {
                 reached += 1;
-                if conn.direct {
+                if let Some(target_key) = conn.relay {
+                    self.relay_queue.push(RelayDelivery {
+                        emitter: conn.receiver,
+                        key: target_key,
+                        args: payload.clone_any_boxed(),
+                    });
+                } else if conn.direct {
                     pending_direct.push((
                         conn.receiver,
                         conn.call.clone(),

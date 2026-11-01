@@ -52,10 +52,18 @@ fn signal_descriptors_match_declarations() {
                 name: "i32",
                 id: TypeId::of::<i32>(),
             }],
+            payload: TypeRef {
+                name: "i32",
+                id: TypeId::of::<i32>(),
+            },
         },
         SignalDescriptor {
             name: "stuck",
             args: &[],
+            payload: TypeRef {
+                name: "()",
+                id: TypeId::of::<()>(),
+            },
         },
     ];
     assert_eq!(Gauge::meta().signals, &EXPECTED);
@@ -81,6 +89,10 @@ fn slot_descriptors_match_methods() {
         SlotDescriptor {
             name: "clear",
             args: &[],
+            payload: TypeRef {
+                name: "()",
+                id: TypeId::of::<()>(),
+            },
             ret: TypeRef {
                 name: "()",
                 id: TypeId::of::<()>(),
@@ -92,6 +104,10 @@ fn slot_descriptors_match_methods() {
                 name: "&str",
                 id: TypeId::of::<&str>(),
             }],
+            payload: TypeRef {
+                name: "&str",
+                id: TypeId::of::<&str>(),
+            },
             ret: TypeRef {
                 name: "String",
                 id: TypeId::of::<String>(),

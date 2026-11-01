@@ -2,7 +2,7 @@
 //! (ADR 0005): a single entry point ([`Hub::dynamic`]), signature validation,
 //! `Result` returns, and every lookup traced through the audit hook.
 
-use core::any::TypeId;
+use core::any::{Any, TypeId};
 use std::rc::Rc;
 
 use crate::audit::TraceEvent;
@@ -18,8 +18,10 @@ pub enum DynamicError {
     StaleHandle { name: &'static str },
     UnknownSignal { owner: &'static str, signal: &'static str },
     UnknownSlot { owner: &'static str, slot: &'static str },
+    /// The type has no such property.
+    UnknownProperty { owner: &'static str, property: &'static str },
     ArityMismatch { owner: &'static str, signal: &'static str, slot: &'static str },
-    /// The payload's type did not match the signal's declared argument.
+    /// The payload's type did not match the declared type.
     PayloadMismatch { expected: &'static str },
 }
 
@@ -131,7 +133,11 @@ impl Dynamic<'_> {
             });
         }
 
-        let call: crate::signal::ErasedCall = Rc::new(invoker);
+        // The invoker hands back the slot's return value; queued and direct
+        // deliveries discard it, so adapt to the unit-returning erased call.
+        let call: crate::signal::ErasedCall = Rc::new(move |recv, payload| {
+            invoker(recv, payload);
+        });
         Ok(self.hub.store_connection(
             emitter,
             (emitter_type, signal_index),
@@ -139,13 +145,13 @@ impl Dynamic<'_> {
             receiver_type,
             call,
             false,
+            None,
         ))
     }
 
     /// Emit `emitter.signal_name` with an erased payload. The payload's type
-    /// is validated against the signal's declared argument (unit and
-    /// single-argument signals; multi-argument payloads must be the exact
-    /// tuple type — not checkable ahead, fails at delivery).
+    /// is validated against the signal's declared payload — unit, the bare
+    /// single argument, or the argument tuple, whatever the arity.
     pub fn emit_by_name(
         &mut self,
         emitter: Handle,
@@ -153,28 +159,143 @@ impl Dynamic<'_> {
         payload: Box<dyn CloneAny>,
     ) -> Result<usize, DynamicError> {
         let (meta, emitter_type) = self.meta_of(emitter, signal_name)?;
-        let (signal_index, arity) = self.find_signal(meta, signal_name)?;
+        let (signal_index, _arity) = self.find_signal(meta, signal_name)?;
 
-        if arity <= 1 {
-            let expected = if arity == 0 {
-                TypeId::of::<()>()
-            } else {
-                meta.signals[signal_index as usize].args[0].id
-            };
-            let expected_name = if arity == 0 {
-                "()"
-            } else {
-                meta.signals[signal_index as usize].args[0].name
-            };
-            if (*payload.clone_any()).type_id() != expected {
-                return Err(DynamicError::PayloadMismatch {
-                    expected: expected_name,
-                });
-            }
+        let signal = &meta.signals[signal_index as usize];
+        if (*payload.clone_any()).type_id() != signal.payload.id {
+            return Err(DynamicError::PayloadMismatch {
+                expected: signal.payload.name,
+            });
         }
 
         Ok(self
             .hub
             .emit_erased(emitter, (emitter_type, signal_index), payload))
+    }
+
+    /// Invoke `receiver.slot_name` synchronously with an erased payload,
+    /// returning the slot's value erased (`None` when the slot returns
+    /// nothing). The payload's type is validated against the slot's declared
+    /// payload; every lookup is traced.
+    pub fn invoke_by_name(
+        &mut self,
+        receiver: Handle,
+        slot_name: &'static str,
+        payload: Box<dyn CloneAny>,
+    ) -> Result<Option<Box<dyn Any>>, DynamicError> {
+        let (meta, _) = self.meta_of(receiver, slot_name)?;
+
+        let slot = meta.slots.iter().find(|s| s.name == slot_name);
+        let invoker = meta
+            .slot_invokers
+            .iter()
+            .find(|(name, _)| *name == slot_name)
+            .map(|(_, invoker)| *invoker);
+        self.hub.trace_event(TraceEvent::DynamicLookup {
+            name: slot_name,
+            resolved: slot.is_some() && invoker.is_some(),
+        });
+        let Some(slot) = slot else {
+            return Err(DynamicError::UnknownSlot {
+                owner: meta.type_name,
+                slot: slot_name,
+            });
+        };
+        let Some(invoker) = invoker else {
+            return Err(DynamicError::UnknownSlot {
+                owner: meta.type_name,
+                slot: slot_name,
+            });
+        };
+        if (*payload.clone_any()).type_id() != slot.payload.id {
+            return Err(DynamicError::PayloadMismatch {
+                expected: slot.payload.name,
+            });
+        }
+        let Some(value) = self.hub.any_mut(receiver) else {
+            self.hub.trace_event(TraceEvent::DynamicLookup {
+                name: slot_name,
+                resolved: false,
+            });
+            return Err(DynamicError::StaleHandle { name: slot_name });
+        };
+        Ok(invoker(&mut **value, payload.clone_any()))
+    }
+
+    /// Read `handle.property_name` erased. Every lookup is traced.
+    pub fn get_property_by_name(
+        &mut self,
+        handle: Handle,
+        property_name: &'static str,
+    ) -> Result<Option<Box<dyn Any>>, DynamicError> {
+        let (meta, _) = self.meta_of(handle, property_name)?;
+        let descriptor = meta.properties.iter().find(|p| p.name == property_name);
+        self.hub.trace_event(TraceEvent::DynamicLookup {
+            name: property_name,
+            resolved: descriptor.is_some(),
+        });
+        let Some(_) = descriptor else {
+            return Err(DynamicError::UnknownProperty {
+                owner: meta.type_name,
+                property: property_name,
+            });
+        };
+        let Some(props) = self.hub.property_inputs(handle) else {
+            self.hub.trace_event(TraceEvent::DynamicLookup {
+                name: property_name,
+                resolved: false,
+            });
+            return Err(DynamicError::StaleHandle {
+                name: property_name,
+            });
+        };
+        Ok(props.get_property(property_name))
+    }
+
+    /// Write `handle.property_name` with an erased payload, validated against
+    /// the declared property type. The write marks the property dirty —
+    /// change signals deliver at the next flush, exactly like a typed `set`.
+    /// Every lookup is traced.
+    pub fn set_property_by_name(
+        &mut self,
+        handle: Handle,
+        property_name: &'static str,
+        value: Box<dyn CloneAny>,
+    ) -> Result<(), DynamicError> {
+        let (meta, _) = self.meta_of(handle, property_name)?;
+        let descriptor = meta.properties.iter().find(|p| p.name == property_name);
+        self.hub.trace_event(TraceEvent::DynamicLookup {
+            name: property_name,
+            resolved: descriptor.is_some(),
+        });
+        let Some(descriptor) = descriptor else {
+            return Err(DynamicError::UnknownProperty {
+                owner: meta.type_name,
+                property: property_name,
+            });
+        };
+        if (*value.clone_any()).type_id() != descriptor.ty.id {
+            return Err(DynamicError::PayloadMismatch {
+                expected: descriptor.ty.name,
+            });
+        }
+        let Some(props) = self.hub.property_inputs(handle) else {
+            self.hub.trace_event(TraceEvent::DynamicLookup {
+                name: property_name,
+                resolved: false,
+            });
+            return Err(DynamicError::StaleHandle {
+                name: property_name,
+            });
+        };
+        match props.set_property(property_name, value.clone_any()) {
+            Ok(()) => Ok(()),
+            // The descriptor check above makes this unreachable; treat it as
+            // unknown rather than losing the invariant.
+            Err(_) => Err(DynamicError::UnknownProperty {
+                owner: meta.type_name,
+                property: property_name,
+            }),
+        }
     }
 }

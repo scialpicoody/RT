@@ -233,6 +233,8 @@ fn signal_descriptor(method: &mut ImplItemFn) -> Result<SignalInfo, Error> {
         1 => quote!(#(#arg_tys)*),
         _ => quote!((#(#arg_tys),*)),
     };
+    let payload_type: syn::Type = syn::parse_quote!(#args_ty);
+    let payload = type_ref(&payload_type);
     method.block = syn::parse_quote!({
         ::core::panic!("rt: emit through Hub::emit(handle, Self::#const_ident, args)")
     });
@@ -244,6 +246,7 @@ fn signal_descriptor(method: &mut ImplItemFn) -> Result<SignalInfo, Error> {
             ::rt_core::meta::SignalDescriptor {
                 name: #name,
                 args: &[#(#args),*],
+                payload: #payload,
             }
         },
         const_ident,
@@ -275,8 +278,9 @@ fn slot_descriptor(
         })
         .collect();
     // Adapters match a signal's payload arity (unit / single / tuple) so
-    // every slot fits `fn(&mut Recv, Args)`; wrappers erase receiver and
-    // payload for the by-name invoker table.
+    // every slot fits `fn(&mut Recv, Args)` and pass the slot's return
+    // value through; wrappers erase receiver and payload for the by-name
+    // invoker table, handing back the erased return value.
     let adapter_name = Ident::new(&format!("{ident}_slot"), ident.span());
     let wrapper_name = Ident::new(&format!("__slot_invoke_{ident}"), ident.span());
     let payload_ty = match arg_tys.len() {
@@ -284,49 +288,78 @@ fn slot_descriptor(
         1 => quote!(#(#arg_tys)*),
         _ => quote!((#(#arg_tys),*)),
     };
+    let payload_type: syn::Type = syn::parse_quote!(#payload_ty);
+    let payload = type_ref(&payload_type);
+    let ret_ty = match &sig.output {
+        ReturnType::Default => quote!(()),
+        ReturnType::Type(_, ty) => quote!(#ty),
+    };
+    let returns_value = !matches!(sig.output, ReturnType::Default);
     let adapter = match arg_tys.len() {
         0 => quote! {
             #[doc = "Slot adapter: takes the unit signal payload."]
-            pub fn #adapter_name(recv: &mut #self_ty, _args: ()) {
-                recv.#ident();
+            pub fn #adapter_name(recv: &mut #self_ty, _args: ()) -> #ret_ty {
+                recv.#ident()
             }
         },
         1 => quote! {
             #[doc = "Slot adapter: takes the signal payload."]
-            pub fn #adapter_name(recv: &mut #self_ty, arg: #(#arg_tys)*) {
-                recv.#ident(arg);
+            pub fn #adapter_name(recv: &mut #self_ty, arg: #(#arg_tys)*) -> #ret_ty {
+                recv.#ident(arg)
             }
         },
         _ => {
             let indices: Vec<_> = (0..arg_tys.len()).map(syn::Index::from).collect();
             quote! {
                 #[doc = "Slot adapter: takes the signal payload as a tuple."]
-                pub fn #adapter_name(recv: &mut #self_ty, args: (#(#arg_tys),*)) {
-                    recv.#ident(#(args.#indices),*);
+                pub fn #adapter_name(recv: &mut #self_ty, args: (#(#arg_tys),*)) -> #ret_ty {
+                    recv.#ident(#(args.#indices),*)
                 }
             }
         }
     };
-    let wrapper = quote! {
-        #[doc = "By-name invoker (feature `dynamic-invoke`); not typed API."]
-        #[doc(hidden)]
-        pub fn #wrapper_name(
-            recv: &mut dyn ::core::any::Any,
-            boxed: ::std::boxed::Box<dyn ::core::any::Any>,
-        ) {
-            let recv = recv
-                .downcast_mut::<#self_ty>()
-                .expect("rt: receiver type mismatch");
-            let arg = *boxed
-                .downcast::<#payload_ty>()
-                .expect("rt: by-name payload mismatch");
-            Self::#adapter_name(recv, arg);
+    let call_site = quote! { Self::#adapter_name(recv, arg) };
+    let wrapper = if returns_value {
+        quote! {
+            #[doc = "By-name invoker (feature `dynamic-invoke`); not typed API."]
+            #[doc(hidden)]
+            pub fn #wrapper_name(
+                recv: &mut dyn ::core::any::Any,
+                boxed: ::std::boxed::Box<dyn ::core::any::Any>,
+            ) -> ::std::option::Option<::std::boxed::Box<dyn ::core::any::Any>> {
+                let recv = recv
+                    .downcast_mut::<#self_ty>()
+                    .expect("rt: receiver type mismatch");
+                let arg = *boxed
+                    .downcast::<#payload_ty>()
+                    .expect("rt: by-name payload mismatch");
+                Some(::std::boxed::Box::new(#call_site))
+            }
+        }
+    } else {
+        quote! {
+            #[doc = "By-name invoker (feature `dynamic-invoke`); not typed API."]
+            #[doc(hidden)]
+            pub fn #wrapper_name(
+                recv: &mut dyn ::core::any::Any,
+                boxed: ::std::boxed::Box<dyn ::core::any::Any>,
+            ) -> ::std::option::Option<::std::boxed::Box<dyn ::core::any::Any>> {
+                let recv = recv
+                    .downcast_mut::<#self_ty>()
+                    .expect("rt: receiver type mismatch");
+                let arg = *boxed
+                    .downcast::<#payload_ty>()
+                    .expect("rt: by-name payload mismatch");
+                #call_site;
+                None
+            }
         }
     };
     let descriptor = quote! {
         ::rt_core::meta::SlotDescriptor {
             name: #name,
             args: &[#(#args),*],
+            payload: #payload,
             ret: #ret,
         }
     };

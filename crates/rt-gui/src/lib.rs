@@ -9,6 +9,8 @@
 
 pub mod damage;
 pub mod gui;
+#[doc(hidden)]
+pub mod harness;
 pub mod input;
 pub mod pixel;
 pub mod widget;

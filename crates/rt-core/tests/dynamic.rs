@@ -19,6 +19,8 @@ impl Knob {
     fn turned(&self, steps: u8);
     #[signal]
     fn bumped(&self);
+    #[signal]
+    fn moved(&self, x: u8, y: u8);
 }
 
 #[derive(Object)]
@@ -38,6 +40,10 @@ impl Display {
     #[slot]
     fn pair(&mut self, a: u8, b: u8) {
         self.log.push(format!("pair:{a},{b}"));
+    }
+    #[slot]
+    fn sum(&self, a: u8, b: u8) -> u8 {
+        a.wrapping_add(b)
     }
 }
 
@@ -151,4 +157,159 @@ fn lookups_are_traced() {
 
     let _ = hub.dynamic(&registry).connect_by_name(knob, "nope", display, "flash");
     assert_eq!(*events.borrow(), [TraceEvent::DynamicLookup { name: "nope", resolved: false }]);
+}
+
+#[test]
+fn multi_arg_payload_is_validated_by_name() {
+    let (mut hub, registry, knob, display) = setup();
+    hub.dynamic(&registry)
+        .connect_by_name(knob, "moved", display, "pair")
+        .expect("matching arities");
+
+    assert_eq!(
+        hub.dynamic(&registry)
+            .emit_by_name(knob, "moved", Box::new((1u8, 2u8))),
+        Ok(1)
+    );
+    assert_eq!(hub.flush(), 1);
+    assert_eq!(hub.get::<Display>(display).unwrap().log, ["pair:1,2"]);
+
+    // A wrong payload is rejected ahead of delivery at any arity.
+    assert_eq!(
+        hub.dynamic(&registry)
+            .emit_by_name(knob, "moved", Box::new(7u8)),
+        Err(DynamicError::PayloadMismatch {
+            expected: "(u8,u8)"
+        })
+    );
+}
+
+#[test]
+fn invoke_by_name_returns_the_slot_value() {
+    let (mut hub, registry, _knob, display) = setup();
+
+    match hub
+        .dynamic(&registry)
+        .invoke_by_name(display, "sum", Box::new((2u8, 3u8)))
+    {
+        Ok(Some(value)) => assert_eq!(*value.downcast::<u8>().unwrap(), 5),
+        _ => panic!("expected the erased slot value"),
+    }
+
+    // Unit-returning slots hand back None.
+    match hub
+        .dynamic(&registry)
+        .invoke_by_name(display, "flash", Box::new(()))
+    {
+        Ok(None) => {}
+        _ => panic!("expected None for a unit-returning slot"),
+    }
+}
+
+#[test]
+fn invoke_by_name_rejects_bad_targets_and_payloads() {
+    let (mut hub, registry, knob, _display) = setup();
+    match hub
+        .dynamic(&registry)
+        .invoke_by_name(knob, "nope", Box::new(()))
+    {
+        Err(DynamicError::UnknownSlot { owner, slot }) => {
+            assert_eq!(owner, "Knob");
+            assert_eq!(slot, "nope");
+        }
+        _ => panic!("expected UnknownSlot"),
+    }
+    // A slot that exists on another kind is unknown for this owner.
+    match hub
+        .dynamic(&registry)
+        .invoke_by_name(knob, "sum", Box::new(()))
+    {
+        Err(DynamicError::UnknownSlot { owner, slot }) => {
+            assert_eq!(owner, "Knob");
+            assert_eq!(slot, "sum");
+        }
+        _ => panic!("expected UnknownSlot"),
+    }
+
+    let (mut hub, registry, _knob, display) = setup();
+    match hub
+        .dynamic(&registry)
+        .invoke_by_name(display, "sum", Box::new(7u8))
+    {
+        Err(DynamicError::PayloadMismatch { expected }) => {
+            assert_eq!(expected, "(u8,u8)");
+        }
+        _ => panic!("expected PayloadMismatch"),
+    }
+
+    // Stale handle: the object was destroyed in this hub.
+    let (mut hub, registry, _knob, display) = setup();
+    hub.destroy(display);
+    match hub
+        .dynamic(&registry)
+        .invoke_by_name(display, "sum", Box::new((1u8, 1u8)))
+    {
+        Err(DynamicError::StaleHandle { name }) => assert_eq!(name, "sum"),
+        _ => panic!("expected StaleHandle"),
+    }
+}
+
+#[test]
+fn properties_are_readable_and_writable_by_name() {
+    let (mut hub, registry, knob, display) = setup();
+    // Typed observer for the change token: delivered by flush after the
+    // by-name write, exactly like a typed set.
+    hub.connect(knob, Knob::LEVEL_CHANGED, display, Display::show);
+
+    match hub.dynamic(&registry).get_property_by_name(knob, "level") {
+        Ok(Some(value)) => assert_eq!(*value.downcast::<u8>().unwrap(), 0),
+        _ => panic!("expected the erased level"),
+    }
+
+    hub.dynamic(&registry)
+        .set_property_by_name(knob, "level", Box::new(5u8))
+        .expect("known property");
+    assert_eq!(hub.flush(), 1);
+    assert_eq!(hub.get::<Knob>(knob).unwrap().level.get(), 5);
+    assert_eq!(hub.get::<Display>(display).unwrap().log, ["steps:5"]);
+}
+
+#[test]
+fn property_by_name_rejects_unknown_names_and_payloads() {
+    let (mut hub, registry, knob, display) = setup();
+
+    match hub.dynamic(&registry).get_property_by_name(knob, "nope") {
+        Err(DynamicError::UnknownProperty { owner, property }) => {
+            assert_eq!(owner, "Knob");
+            assert_eq!(property, "nope");
+        }
+        _ => panic!("expected UnknownProperty"),
+    }
+    // A property that exists on another kind is unknown for this owner.
+    match hub
+        .dynamic(&registry)
+        .set_property_by_name(display, "level", Box::new(1u8))
+    {
+        Err(DynamicError::UnknownProperty { owner, property }) => {
+            assert_eq!(owner, "Display");
+            assert_eq!(property, "level");
+        }
+        _ => panic!("expected UnknownProperty"),
+    }
+    // Wrong payload type is rejected ahead of the write.
+    match hub
+        .dynamic(&registry)
+        .set_property_by_name(knob, "level", Box::new(1i32))
+    {
+        Err(DynamicError::PayloadMismatch { expected }) => assert_eq!(expected, "u8"),
+        _ => panic!("expected PayloadMismatch"),
+    }
+
+    // Stale handle.
+    let (mut hub, registry, _knob, display) = setup();
+    hub.destroy(display);
+    match hub.dynamic(&registry).get_property_by_name(display, "level") {
+        Err(DynamicError::StaleHandle { name }) => assert_eq!(name, "level"),
+        _ => panic!("expected StaleHandle"),
+    }
 }

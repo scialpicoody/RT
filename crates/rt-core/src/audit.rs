@@ -37,4 +37,9 @@ pub enum TraceEvent {
         name: &'static str,
         resolved: bool,
     },
+    /// The binding engine evaluated a property binding during the flush step.
+    BindingEvaluated {
+        target: Handle,
+        property: &'static str,
+    },
 }

@@ -24,12 +24,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Enforce ADR 0006 (rt-core zero third-party; rt-app std-only)
+      - name: Enforce ADR 0007 per-tier dependency allowlist
         run: |
           set -eu
           deps() { sed -n '/^\[dependencies\]/,/^\[/p' "$1" | grep -E '^[a-zA-Z0-9_-]+' | cut -d' ' -f1 | cut -d'.' -f1; }
-          bad=$(deps crates/rt-core/Cargo.toml | grep -v '^rt-macros$' || true)
-          if [ -n "$bad" ]; then echo "rt-core has forbidden deps: $bad"; exit 1; fi
-          bad=$(deps crates/rt-app/Cargo.toml | grep -v '^rt-core$' || true)
-          if [ -n "$bad" ]; then echo "rt-app has forbidden deps: $bad"; exit 1; fi
-          echo "Dependency policy holds."
+          # keep in sync with ADR 0007 (docs/adr/0007-ecosystem-dependency-policy.md)
+          GUI_ALLOW='winit softbuffer embedded-graphics taffy vello vello_cpu wgpu parley fontique'
+          check() { # $1 = crate name, $2 = manifest, $3.. = allowed deps
+            local crate=$1 manifest=$2; shift 2
+            local bad pat=''
+            # first-party workspace crates are always allowed
+            bad=$(deps "$manifest" | grep -vxE 'rt-core|rt-app|rt-macros' || true)
+            for a in "$@"; do pat="$pat$a|"; done
+            bad=$(printf '%s\n' "$bad" | grep -vxE "${pat%|}" || true)
+            if [ -n "$bad" ]; then
+              echo "$crate has dependencies outside the ADR 0007 allowlist: $bad"
+              echo "Review gate: add the dependency to docs/adr/0007-ecosystem-dependency-policy.md (with a one-line justification) and to this job's allowlist, or remove it."
+              exit 1
+            fi
+          }
+          check rt-core crates/rt-core/Cargo.toml rt-macros
+          check rt-app crates/rt-app/Cargo.toml rt-core
+          # shellcheck disable=SC2086
+          check rt-gui crates/rt-gui/Cargo.toml $GUI_ALLOW
+          echo "Dependency policy holds (ADR 0007)."

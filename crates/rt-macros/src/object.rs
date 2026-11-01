@@ -65,6 +65,33 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream, Error> {
         }
     });
 
+    // By-name accessors: one arm per `#[property]` field, keyed by the
+    // literal field name so the erased dynamic path can serve them.
+    let name_lits = properties.iter().map(|(name, _)| {
+        proc_macro2::Literal::string(&name.to_string())
+    });
+    let get_arms = properties.iter().zip(name_lits.clone()).map(|((name, _), lit)| {
+        quote! {
+            #lit => Some(::std::boxed::Box::new(self.#name.get())),
+        }
+    });
+    let dirty_arms = properties.iter().zip(name_lits.clone()).map(|((name, _), lit)| {
+        quote! {
+            #lit => ::std::option::Option::Some(self.#name.peek_dirty()),
+        }
+    });
+    let set_arms = properties.iter().zip(name_lits).map(|((name, inner), lit)| {
+        quote! {
+            #lit => {
+                let value = *value
+                    .downcast::<#inner>()
+                    .expect("rt: by-name property type mismatch");
+                self.#name.set(value);
+                ::std::result::Result::Ok(())
+            }
+        }
+    });
+
     Ok(quote! {
         #[automatically_derived]
         impl ::rt_core::property::PropertyInputs for #ident {
@@ -74,6 +101,34 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream, Error> {
                 let mut changes = ::std::vec::Vec::new();
                 #(#takes)*
                 changes
+            }
+
+            fn is_dirty(&self, name: &str) -> ::std::option::Option<bool> {
+                match name {
+                    #(#dirty_arms)*
+                    _ => ::std::option::Option::None,
+                }
+            }
+
+            fn get_property(
+                &self,
+                name: &str,
+            ) -> ::std::option::Option<::std::boxed::Box<dyn ::core::any::Any>> {
+                match name {
+                    #(#get_arms)*
+                    _ => ::std::option::Option::None,
+                }
+            }
+
+            fn set_property(
+                &mut self,
+                name: &str,
+                value: ::std::boxed::Box<dyn ::core::any::Any>,
+            ) -> ::std::result::Result<(), ::std::boxed::Box<dyn ::core::any::Any>> {
+                match name {
+                    #(#set_arms)*
+                    _ => ::std::result::Result::Err(value),
+                }
             }
         }
 

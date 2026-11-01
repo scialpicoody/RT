@@ -83,6 +83,7 @@ fn full_stack_chain_registry_to_repaint() {
     builder.register::<Panel>().register::<Counter>().register::<Bridge>();
     #[cfg(feature = "dynamic-invoke")]
     builder.register::<Recorder>();
+    #[cfg_attr(not(feature = "dynamic-invoke"), allow(unused_variables))]
     let registry: Registry = builder.build();
 
     let panel = hub.insert(Panel);
