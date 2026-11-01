@@ -2,9 +2,9 @@
 //! `InputTranslator::translate`. Pure: constructing winit event values opens
 //! no window, so these tests run headless.
 
+use rt_gui::{InputEvent, InputTranslator};
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
-use rt_gui::{InputEvent, InputTranslator};
 
 fn moved(x: f64, y: f64) -> WindowEvent {
     WindowEvent::CursorMoved {
@@ -60,10 +60,16 @@ fn press_without_prior_cursor_position_is_dropped() {
 #[test]
 fn close_and_resize_translate_directly() {
     let mut t = InputTranslator::new();
-    assert_eq!(t.translate(&WindowEvent::CloseRequested), Some(InputEvent::CloseRequested));
+    assert_eq!(
+        t.translate(&WindowEvent::CloseRequested),
+        Some(InputEvent::CloseRequested)
+    );
     assert_eq!(
         t.translate(&WindowEvent::Resized(PhysicalSize::new(640, 480))),
-        Some(InputEvent::Resized { width: 640, height: 480 })
+        Some(InputEvent::Resized {
+            width: 640,
+            height: 480
+        })
     );
 }
 
@@ -71,5 +77,10 @@ fn close_and_resize_translate_directly() {
 fn untranslated_window_events_yield_none() {
     let mut t = InputTranslator::new();
     assert_eq!(t.translate(&WindowEvent::Focused(true)), None);
-    assert_eq!(t.translate(&WindowEvent::CursorLeft { device_id: DeviceId::dummy() }), None);
+    assert_eq!(
+        t.translate(&WindowEvent::CursorLeft {
+            device_id: DeviceId::dummy()
+        }),
+        None
+    );
 }

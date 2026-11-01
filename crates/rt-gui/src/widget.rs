@@ -6,8 +6,8 @@
 use vello_cpu::kurbo::{Point, Rect};
 use vello_cpu::peniko::Color;
 
-use taffy::style_helpers::length;
 use taffy::Style;
+use taffy::style_helpers::length;
 
 use crate::input::InputEvent;
 use crate::paint::{LABEL_COLOR, LABEL_FONT_SIZE, Painter, measure_label};

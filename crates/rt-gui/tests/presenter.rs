@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use rt_core::{object_impl, Handle, Object, TraceEvent};
+use rt_core::{Handle, Object, TraceEvent, object_impl};
 use rt_gui::input::InputEvent;
 use rt_gui::presenter::WindowShell;
 use rt_gui::window::{CloseState, Window, WindowEvent};
@@ -72,7 +72,9 @@ fn traced_shell() -> (WindowShell, Handle, TraceLog) {
     );
     let log: TraceLog = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&log);
-    shell.hub_mut().set_trace(move |event| sink.borrow_mut().push(event));
+    shell
+        .hub_mut()
+        .set_trace(move |event| sink.borrow_mut().push(event));
     (shell, observer, log)
 }
 
@@ -112,7 +114,10 @@ fn resize_message_updates_window_object_gui_and_damage() {
     assert!(!shell.gui().is_dirty());
     let frame = shell.gui().frame();
     assert_eq!(frame.len(), (640 * 480) as usize);
-    assert!(distinct_colors(frame) > 1, "buttons must be visible on black");
+    assert!(
+        distinct_colors(frame) > 1,
+        "buttons must be visible on black"
+    );
 }
 
 #[test]
@@ -138,7 +143,11 @@ fn close_chain_through_the_shell() {
     shell.handle_window_event(WindowEvent::CloseRequested);
     shell.flush_and_paint();
     assert_eq!(
-        shell.hub().get::<WindowObserver>(observer).unwrap().close_requests,
+        shell
+            .hub()
+            .get::<WindowObserver>(observer)
+            .unwrap()
+            .close_requests,
         1
     );
 
@@ -150,7 +159,11 @@ fn close_chain_through_the_shell() {
     shell.handle_window_event(WindowEvent::CloseRequested);
     shell.flush_and_paint();
     assert_eq!(
-        shell.hub().get::<WindowObserver>(observer).unwrap().close_requests,
+        shell
+            .hub()
+            .get::<WindowObserver>(observer)
+            .unwrap()
+            .close_requests,
         2
     );
     assert_eq!(shell.window().close_state(), CloseState::PendingClose);
@@ -197,8 +210,14 @@ fn flush_and_paint_is_the_single_flush_step() {
     let (mut shell, observer, trace) = traced_shell();
 
     // Queue two window events; both must deliver at the one flush.
-    shell.handle_window_event(WindowEvent::Resized { width: 100, height: 80 });
-    shell.handle_window_event(WindowEvent::Resized { width: 200, height: 160 });
+    shell.handle_window_event(WindowEvent::Resized {
+        width: 100,
+        height: 80,
+    });
+    shell.handle_window_event(WindowEvent::Resized {
+        width: 200,
+        height: 160,
+    });
     assert!(shell.flush_and_paint());
 
     let delivered = trace
@@ -206,7 +225,10 @@ fn flush_and_paint_is_the_single_flush_step() {
         .iter()
         .filter(|event| matches!(event, TraceEvent::Delivered { receiver, .. } if *receiver == observer))
         .count();
-    assert_eq!(delivered, 2, "one flush delivers every queued signal exactly once");
+    assert_eq!(
+        delivered, 2,
+        "one flush delivers every queued signal exactly once"
+    );
     assert_eq!(shell.hub().pending(), 0);
 
     // A clean cycle: no queued emissions, no damage — nothing happens.

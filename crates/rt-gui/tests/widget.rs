@@ -24,8 +24,14 @@ fn px(buffer: &[u32], x: i32, y: i32) -> u32 {
 fn reports_its_geometry_and_hit_tests() {
     let b = button();
     assert_eq!(b.rect(), Rect::new(2.0, 3.0, 32.0, 23.0));
-    assert!(b.contains(Point::new(2.0, 3.0)), "top-left corner is inside");
-    assert!(b.contains(Point::new(31.0, 22.0)), "bottom-right corner is inside");
+    assert!(
+        b.contains(Point::new(2.0, 3.0)),
+        "top-left corner is inside"
+    );
+    assert!(
+        b.contains(Point::new(31.0, 22.0)),
+        "bottom-right corner is inside"
+    );
     assert!(!b.contains(Point::new(1.0, 3.0)));
     assert!(!b.contains(Point::new(32.0, 22.0)));
 }
@@ -124,6 +130,13 @@ fn pressed_state_renders_differently_than_normal() {
 #[test]
 fn resize_and_close_are_ignored() {
     let mut b = button();
-    assert_eq!(b.handle(&InputEvent::Resized { width: 800, height: 600 }).damage, None);
+    assert_eq!(
+        b.handle(&InputEvent::Resized {
+            width: 800,
+            height: 600
+        })
+        .damage,
+        None
+    );
     assert_eq!(b.handle(&InputEvent::CloseRequested).damage, None);
 }

@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use rt_app::{AppHandle, Ctx, TimerId};
 use rt_gui::input::InputEvent;
-use rt_gui::presenter::{run_window, WindowApplication, WindowConfig, WindowMsg, WindowShell};
+use rt_gui::presenter::{WindowApplication, WindowConfig, WindowMsg, WindowShell, run_window};
 use rt_gui::window::WindowEvent;
 
 /// Bootstrap sends this once the loop thread is up; the handler arms the
@@ -42,7 +42,12 @@ impl WindowApplication<Demo> for DemoApp {
         }
     }
 
-    fn on_window_timer(&mut self, _ctx: &mut Ctx<WindowMsg<Demo>>, timer: TimerId, shell: &mut WindowShell) {
+    fn on_window_timer(
+        &mut self,
+        _ctx: &mut Ctx<WindowMsg<Demo>>,
+        timer: TimerId,
+        shell: &mut WindowShell,
+    ) {
         if Some(timer) == self.click_timer {
             // Click button 2 programmatically: synthetic mouse input routed
             // through the shell (hit test on post-layout geometry).
@@ -110,5 +115,8 @@ fn main() {
         },
     );
     println!("run_window demo exited with code {code}");
-    assert_eq!(code, 0, "the close chain must quit with the configured code");
+    assert_eq!(
+        code, 0,
+        "the close chain must quit with the configured code"
+    );
 }

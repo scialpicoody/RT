@@ -64,7 +64,10 @@ mod tests {
 
     #[test]
     fn color_conversion_is_lossless_for_opaque_colors() {
-        assert_eq!(color_to_u32(Color::from_rgb8(0x12, 0x34, 0x56)), 0x0012_3456);
+        assert_eq!(
+            color_to_u32(Color::from_rgb8(0x12, 0x34, 0x56)),
+            0x0012_3456
+        );
     }
 
     #[test]

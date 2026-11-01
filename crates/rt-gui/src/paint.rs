@@ -10,9 +10,9 @@
 use parley::layout::PositionedLayoutItem;
 use parley::{Alignment, AlignmentOptions, FontFamily, GenericFamily, StyleProperty};
 use vello_cpu::Glyph;
+use vello_cpu::PixmapMut;
 use vello_cpu::kurbo::{Point as KPoint, Rect as KRect};
 use vello_cpu::peniko::{Color, Fill};
-use vello_cpu::PixmapMut;
 use vello_cpu::{RasterizerSettings, RenderContext, Resources, TargetInit};
 
 use crate::pixel::premul_rgba8_to_frame;
@@ -56,8 +56,10 @@ impl Painter {
         self.width = width;
         self.height = height;
         self.rgba = vec![0; (width * height * 4) as usize];
-        self.rc
-            .reset_and_resize(u16::try_from(width).expect("surface width over u16"), u16::try_from(height).expect("surface height over u16"));
+        self.rc.reset_and_resize(
+            u16::try_from(width).expect("surface width over u16"),
+            u16::try_from(height).expect("surface height over u16"),
+        );
     }
 
     /// Reset paint state for a fresh frame (transforms, layers, clips).
@@ -83,9 +85,9 @@ impl Painter {
         let mut builder = self
             .layout
             .ranged_builder(&mut self.fonts, text, scale, true);
-        builder.push_default(StyleProperty::FontFamily(
-            FontFamily::from(GenericFamily::SystemUi),
-        ));
+        builder.push_default(StyleProperty::FontFamily(FontFamily::from(
+            GenericFamily::SystemUi,
+        )));
         builder.push_default(StyleProperty::FontSize(LABEL_FONT_SIZE));
         let mut layout = builder.build(text);
         layout.break_all_lines(None);
@@ -94,7 +96,9 @@ impl Painter {
         for line in layout.lines() {
             let baseline = origin.y as f32 + line.metrics().baseline;
             for item in line.items() {
-                let PositionedLayoutItem::GlyphRun(run) = item else { continue };
+                let PositionedLayoutItem::GlyphRun(run) = item else {
+                    continue;
+                };
                 let inner = run.run();
                 let font = inner.font().clone();
                 let font_size = inner.font_size();

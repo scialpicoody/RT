@@ -69,18 +69,16 @@ impl Gui {
 
     /// Append a button as the root column's last child; returns its tree id.
     pub fn push_button(&mut self, label: impl Into<String>) -> WidgetId {
-        let id = self.tree.add_child(self.root, Button::new(Rect::ZERO, label));
+        let id = self
+            .tree
+            .add_child(self.root, Button::new(Rect::ZERO, label));
         self.buttons.push(id);
         self.tree.invalidate_layout();
         id
     }
 
     /// Append an arbitrary widget under `parent` (composition seam).
-    pub fn add_child(
-        &mut self,
-        parent: WidgetId,
-        widget: impl Widget + 'static,
-    ) -> WidgetId {
+    pub fn add_child(&mut self, parent: WidgetId, widget: impl Widget + 'static) -> WidgetId {
         let id = self.tree.add_child(parent, widget);
         self.tree.invalidate_layout();
         id
@@ -109,7 +107,8 @@ impl Gui {
     /// The first pushed button's rect (legacy test seam; `None` before the
     /// first layout or with no buttons).
     pub fn button_rect(&self) -> Rect {
-        self.rect_of(self.buttons[0]).expect("gui has a laid-out button")
+        self.rect_of(self.buttons[0])
+            .expect("gui has a laid-out button")
     }
 
     /// Status line rendered at the bottom edge; setting it invalidates
@@ -146,7 +145,11 @@ impl Gui {
                 self.ensure_layout();
                 // A release routes to the pressed widget even when the cursor
                 // left every rect (stale release reaches nobody otherwise).
-                let Some(target) = self.pressed.take().or_else(|| self.tree.hit_test(point(x, y))) else {
+                let Some(target) = self
+                    .pressed
+                    .take()
+                    .or_else(|| self.tree.hit_test(point(x, y)))
+                else {
                     return false;
                 };
                 self.deliver(target, event)
@@ -174,7 +177,10 @@ impl Gui {
     /// Deliver `event` to `target` with its post-layout rect; mark damage on
     /// visual change, count clicks.
     fn deliver(&mut self, target: WidgetId, event: &InputEvent) -> bool {
-        let rect = self.tree.rect_of(target).expect("layout ran before routing");
+        let rect = self
+            .tree
+            .rect_of(target)
+            .expect("layout ran before routing");
         let feedback = self.tree.widget_mut(target).handle_input(event, rect);
         if feedback.clicked {
             self.clicks += 1;

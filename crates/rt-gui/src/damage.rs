@@ -26,12 +26,7 @@ impl Damage {
 
     /// Mark the full `width x height` area as needing repaint.
     pub fn mark_all(&mut self, width: u32, height: u32) {
-        self.mark(Rect::new(
-            0.0,
-            0.0,
-            f64::from(width),
-            f64::from(height),
-        ));
+        self.mark(Rect::new(0.0, 0.0, f64::from(width), f64::from(height)));
     }
 
     /// Whether any region is dirty.

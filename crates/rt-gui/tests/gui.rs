@@ -1,8 +1,8 @@
 //! The widget-root state machine: input → damage, damage → coalesced repaint
 //! scheduling — driven end to end through the headless [`Harness`] seam.
 
-use rt_gui::harness::Harness;
 use rt_gui::InputEvent;
+use rt_gui::harness::Harness;
 
 fn harness() -> Harness {
     Harness::new(320, 240)
@@ -10,7 +10,10 @@ fn harness() -> Harness {
 
 fn inside_move(h: &Harness, dx: i32, dy: i32) -> InputEvent {
     let b = h.button_rect();
-    InputEvent::MouseMoved { x: b.x0 as i32 + dx, y: b.y0 as i32 + dy }
+    InputEvent::MouseMoved {
+        x: b.x0 as i32 + dx,
+        y: b.y0 as i32 + dy,
+    }
 }
 
 #[test]
@@ -38,7 +41,10 @@ fn first_damaging_input_schedules_exactly_one_repaint() {
     h.paint();
 
     assert!(h.feed(inside_move(&h, 5, 5)), "hover schedules a repaint");
-    assert!(!h.feed(inside_move(&h, 6, 6)), "already scheduled: coalesced");
+    assert!(
+        !h.feed(inside_move(&h, 6, 6)),
+        "already scheduled: coalesced"
+    );
     assert!(!h.feed(inside_move(&h, 7, 7)), "still coalesced");
     assert_eq!(h.schedule_log(), [true, false, false]);
 
@@ -53,7 +59,10 @@ fn damage_after_a_paint_schedules_a_new_repaint() {
     h.paint();
     assert!(h.feed(inside_move(&h, 5, 5)));
     h.paint();
-    assert!(h.feed(InputEvent::MouseMoved { x: 0, y: 0 }), "leaving marks new damage");
+    assert!(
+        h.feed(InputEvent::MouseMoved { x: 0, y: 0 }),
+        "leaving marks new damage"
+    );
     assert!(h.paint());
 }
 
@@ -61,7 +70,10 @@ fn damage_after_a_paint_schedules_a_new_repaint() {
 fn resize_reallocates_the_frame_and_invalidates_everything() {
     let mut h = harness();
     h.paint();
-    assert!(h.feed(InputEvent::Resized { width: 640, height: 480 }));
+    assert!(h.feed(InputEvent::Resized {
+        width: 640,
+        height: 480
+    }));
     assert!(h.paint());
     assert_eq!(h.frame().len(), 640 * 480);
     assert_eq!((h.width(), h.height()), (640, 480));
@@ -73,14 +85,29 @@ fn click_is_counted_as_the_reaction_to_a_full_press_release() {
     let mut h = harness();
     h.paint();
     let p = h.point_in_button();
-    h.feed(InputEvent::MouseMoved { x: p.x as i32, y: p.y as i32 });
-    h.feed(InputEvent::MousePressed { x: p.x as i32, y: p.y as i32 });
+    h.feed(InputEvent::MouseMoved {
+        x: p.x as i32,
+        y: p.y as i32,
+    });
+    h.feed(InputEvent::MousePressed {
+        x: p.x as i32,
+        y: p.y as i32,
+    });
     assert_eq!(h.clicks(), 0, "press alone does nothing");
-    h.feed(InputEvent::MouseReleased { x: p.x as i32, y: p.y as i32 });
+    h.feed(InputEvent::MouseReleased {
+        x: p.x as i32,
+        y: p.y as i32,
+    });
     assert_eq!(h.clicks(), 1);
     // A second full click counts again.
-    h.feed(InputEvent::MousePressed { x: p.x as i32, y: p.y as i32 });
-    h.feed(InputEvent::MouseReleased { x: p.x as i32, y: p.y as i32 });
+    h.feed(InputEvent::MousePressed {
+        x: p.x as i32,
+        y: p.y as i32,
+    });
+    h.feed(InputEvent::MouseReleased {
+        x: p.x as i32,
+        y: p.y as i32,
+    });
     assert_eq!(h.clicks(), 2);
 }
 

@@ -93,7 +93,10 @@ fn main() {
     let rt_proxy = proxy.clone();
     std::thread::spawn(move || {
         let mut registry = RegistryBuilder::new();
-        registry.register::<Panel>().register::<Counter>().register::<Bridge>();
+        registry
+            .register::<Panel>()
+            .register::<Counter>()
+            .register::<Bridge>();
         let _registry = registry.build();
 
         let mut hub = Hub::new();
@@ -174,7 +177,10 @@ fn rt_writing_wait<'a>(
     wiring: &'a Wiring,
     guard: std::sync::MutexGuard<'a, Vec<InputEvent>>,
     timeout: Duration,
-) -> (std::sync::MutexGuard<'a, Vec<InputEvent>>, std::sync::WaitTimeoutResult) {
+) -> (
+    std::sync::MutexGuard<'a, Vec<InputEvent>>,
+    std::sync::WaitTimeoutResult,
+) {
     wiring.inbox_signal.wait_timeout(guard, timeout).unwrap()
 }
 
@@ -193,8 +199,7 @@ impl Presenter {
             return;
         };
         let size = window.inner_size();
-        let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
-        else {
+        let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else {
             return;
         };
         surface.resize(w, h).expect("surface resize");

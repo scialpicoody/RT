@@ -137,10 +137,10 @@ impl Harness {
 
     /// Append a button under `parent`; returns its tree id.
     pub fn tree_add_button(&mut self, parent: WidgetId, label: impl Into<String>) -> WidgetId {
-        self.gui.add_child(parent, crate::widget::Button::new(
-            vello_cpu::kurbo::Rect::ZERO,
-            label,
-        ))
+        self.gui.add_child(
+            parent,
+            crate::widget::Button::new(vello_cpu::kurbo::Rect::ZERO, label),
+        )
     }
 
     /// The `index`-th pushed button's tree id.

@@ -56,9 +56,7 @@ const _: () = {
 /// Free-function seam for presenters and tests: the window-level subset of an
 /// [`InputEvent`](crate::input::InputEvent), or `None` for pointer input
 /// (which stays widget-facing).
-pub fn window_event_from_input(
-    event: crate::input::InputEvent,
-) -> Option<WindowEvent> {
+pub fn window_event_from_input(event: crate::input::InputEvent) -> Option<WindowEvent> {
     match event {
         crate::input::InputEvent::Resized { width, height } => {
             Some(WindowEvent::Resized { width, height })
@@ -211,7 +209,11 @@ pub enum WindowEmission {
 /// emissions queued (a coalesced close request returns 0).
 ///
 /// Panics when `handle` is stale or not a `Window`.
-pub fn apply_window_event(hub: &mut rt_core::Hub, handle: rt_core::Handle, event: WindowEvent) -> usize {
+pub fn apply_window_event(
+    hub: &mut rt_core::Hub,
+    handle: rt_core::Handle,
+    event: WindowEvent,
+) -> usize {
     let emissions = hub
         .get_mut::<Window>(handle)
         .expect("rt-gui: window handle stale")

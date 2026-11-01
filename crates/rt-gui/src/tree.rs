@@ -111,17 +111,33 @@ trait ColumnProps {
 }
 
 impl ColumnProps for Column {
-    fn gap(&self) -> f32 { self.gap }
-    fn padding(&self) -> f32 { self.padding }
-    fn align_items(&self) -> taffy::AlignItems { self.align_items }
-    fn justify_content(&self) -> taffy::JustifyContent { self.justify_content }
+    fn gap(&self) -> f32 {
+        self.gap
+    }
+    fn padding(&self) -> f32 {
+        self.padding
+    }
+    fn align_items(&self) -> taffy::AlignItems {
+        self.align_items
+    }
+    fn justify_content(&self) -> taffy::JustifyContent {
+        self.justify_content
+    }
 }
 
 impl ColumnProps for Row {
-    fn gap(&self) -> f32 { self.gap }
-    fn padding(&self) -> f32 { self.padding }
-    fn align_items(&self) -> taffy::AlignItems { self.align_items }
-    fn justify_content(&self) -> taffy::JustifyContent { self.justify_content }
+    fn gap(&self) -> f32 {
+        self.gap
+    }
+    fn padding(&self) -> f32 {
+        self.padding
+    }
+    fn align_items(&self) -> taffy::AlignItems {
+        self.align_items
+    }
+    fn justify_content(&self) -> taffy::JustifyContent {
+        self.justify_content
+    }
 }
 
 // Small constructors keeping the style literal above readable.
@@ -135,14 +151,22 @@ impl Size2D {
     }
     fn uniform_gap(value: f32) -> taffy::Size<taffy::LengthPercentage> {
         let gap: taffy::LengthPercentage = length(value);
-        taffy::Size { width: gap, height: gap }
+        taffy::Size {
+            width: gap,
+            height: gap,
+        }
     }
 }
 struct Pad;
 impl Pad {
     fn uniform(value: f32) -> taffy::Rect<taffy::LengthPercentage> {
         let pad: taffy::LengthPercentage = length(value);
-        taffy::Rect { left: pad, right: pad, top: pad, bottom: pad }
+        taffy::Rect {
+            left: pad,
+            right: pad,
+            top: pad,
+            bottom: pad,
+        }
     }
 }
 
@@ -317,9 +341,7 @@ impl WidgetTree {
         // the child links in insertion order.
         for node in &self.nodes {
             let style = node.widget.style();
-            let taffy_node = taffy_tree
-                .new_leaf(style)
-                .expect("fresh leaf");
+            let taffy_node = taffy_tree.new_leaf(style).expect("fresh leaf");
             self.taffy_nodes.push(taffy_node);
         }
         for (index, node) in self.nodes.iter().enumerate() {

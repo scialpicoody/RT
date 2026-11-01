@@ -45,13 +45,7 @@ impl rt_app::Application for WinApp {
         }
         // Answer a pending close out-of-band, like an unsaved-changes dialog:
         // confirm (next cycle) or veto, per the test's wiring.
-        if self
-            .hub
-            .get::<Window>(self.window)
-            .unwrap()
-            .close_state()
-            == CloseState::PendingClose
-        {
+        if self.hub.get::<Window>(self.window).unwrap().close_state() == CloseState::PendingClose {
             let confirm = self.confirm;
             let window = self.window;
             let hub = &mut self.hub;
@@ -97,7 +91,12 @@ fn setup(hub: &mut Hub) -> (Handle, Handle) {
         scale_factors: vec![],
         close_requests: 0,
     });
-    hub.connect(window, Window::RESIZED, observer, WindowObserver::on_resized_slot);
+    hub.connect(
+        window,
+        Window::RESIZED,
+        observer,
+        WindowObserver::on_resized_slot,
+    );
     hub.connect(
         window,
         Window::SCALE_FACTOR_CHANGED,
@@ -173,8 +172,15 @@ fn resize_message_dirty_flush_signal_observer_and_trace() {
     assert!(matches!(
         log[log.len() - 2..],
         [
-            TraceEvent::Emitted { signal_index: 0, reached: 1, .. },
-            TraceEvent::Delivered { signal_index: 0, .. },
+            TraceEvent::Emitted {
+                signal_index: 0,
+                reached: 1,
+                ..
+            },
+            TraceEvent::Delivered {
+                signal_index: 0,
+                ..
+            },
         ]
     ));
 }
@@ -203,7 +209,10 @@ fn close_chain_confirm_via_app_quit() {
         confirm: true,
     };
     // Another window's user click; ignored, mouse stays InputEvent.
-    handle.send(WindowEvent::Resized { width: 640, height: 480 });
+    handle.send(WindowEvent::Resized {
+        width: 640,
+        height: 480,
+    });
     handle.send(WindowEvent::CloseRequested);
     drop(handle);
     let (win_app, code) = rt_app::App::run(app, win_app);
@@ -212,11 +221,7 @@ fn close_chain_confirm_via_app_quit() {
     assert_eq!(obs.resizes, [(640, 480)]);
     assert_eq!(obs.close_requests, 1);
     assert_eq!(
-        win_app
-            .hub
-            .get::<Window>(window)
-            .unwrap()
-            .close_state(),
+        win_app.hub.get::<Window>(window).unwrap().close_state(),
         CloseState::CloseConfirmed
     );
 }

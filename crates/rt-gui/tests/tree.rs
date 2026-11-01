@@ -29,9 +29,21 @@ fn column_lays_out_buttons_in_flex_order_with_gap() {
     let r1 = h.rect_of(ids[1]).expect("laid out");
     let r2 = h.rect_of(ids[2]).expect("laid out");
 
-    assert_eq!(r0, Rect::new(40.0, 40.0, 240.0, 128.0), "first button at padding origin");
-    assert_eq!(r1, Rect::new(40.0, 140.0, 240.0, 228.0), "second button one gap below");
-    assert_eq!(r2, Rect::new(40.0, 240.0, 240.0, 328.0), "third button clipped by the frame");
+    assert_eq!(
+        r0,
+        Rect::new(40.0, 40.0, 240.0, 128.0),
+        "first button at padding origin"
+    );
+    assert_eq!(
+        r1,
+        Rect::new(40.0, 140.0, 240.0, 228.0),
+        "second button one gap below"
+    );
+    assert_eq!(
+        r2,
+        Rect::new(40.0, 240.0, 240.0, 328.0),
+        "third button clipped by the frame"
+    );
     assert_eq!(r1.y0 - r0.y1, 12.0, "gap honored between buttons 1 and 2");
     assert_eq!(r2.y0 - r1.y1, 12.0, "gap honored between buttons 2 and 3");
     assert_eq!(r0.width(), 200.0, "fixed flex item width");
@@ -44,7 +56,14 @@ fn row_container_lays_out_children_horizontally() {
     // Replace composition: push a Row into the root column and buttons into
     // the Row via the tree API.
     let root = h.root_id();
-    let row = h.tree_add_child(root, rt_gui::Row { gap: 10.0, padding: 0.0, ..Default::default() });
+    let row = h.tree_add_child(
+        root,
+        rt_gui::Row {
+            gap: 10.0,
+            padding: 0.0,
+            ..Default::default()
+        },
+    );
     let a = h.tree_add_button(row, "A");
     let b = h.tree_add_button(row, "B");
     h.paint();
@@ -74,7 +93,11 @@ fn click_routes_to_exactly_the_second_button() {
 
     let r0 = h.rect_of(ids[0]).unwrap();
     let (c0x, c0y) = inside(r0, 0, 0);
-    assert_eq!(h.pixel(c0x as u32, c0y as u32), normal, "button 1 untouched");
+    assert_eq!(
+        h.pixel(c0x as u32, c0y as u32),
+        normal,
+        "button 1 untouched"
+    );
     let r2 = h.rect_of(ids[2]).unwrap();
     // Button 3 is pushed fully below the frame (starts at the bottom edge):
     // no visible pixel to probe, its non-reaction is covered by the click count.
@@ -96,7 +119,11 @@ fn pressed_pixels_differ_for_the_second_button_only() {
     let pressed = color_to_u32(pressed_probe.fill_color());
 
     let normal = color_to_u32(Button::new(Rect::new(0.0, 0.0, 1.0, 1.0), "").fill_color());
-    assert_eq!(h.pixel(x as u32, y as u32), pressed, "button 2 shows pressed fill");
+    assert_eq!(
+        h.pixel(x as u32, y as u32),
+        pressed,
+        "button 2 shows pressed fill"
+    );
     let r0 = h.rect_of(ids[0]).unwrap();
     let (px, py) = (r0.x0 as u32 + 10, r0.y0 as u32 + 10);
     assert_eq!(h.pixel(px, py), normal, "other visible buttons stay normal");
@@ -110,7 +137,10 @@ fn hit_test_prefers_the_last_child_back_to_front() {
     let mut h = Harness::new(320, 240);
     let root = h.root_id();
     let first = h.button_id(0);
-    let second = h.tree_add_child(root, OverlappingButton::pinned(Rect::new(60.0, 40.0, 260.0, 200.0)));
+    let second = h.tree_add_child(
+        root,
+        OverlappingButton::pinned(Rect::new(60.0, 40.0, 260.0, 200.0)),
+    );
     h.paint();
 
     // Point inside both rects: the second (later) button is on top.
@@ -119,11 +149,18 @@ fn hit_test_prefers_the_last_child_back_to_front() {
     assert_eq!(h.tree().hit_test(Point::new(50.0, 50.0)), Some(first));
     // Point over no child: the root column container matches (containers
     // receive but ignore input), so the event reaches nobody in effect.
-    assert_eq!(h.tree().hit_test(Point::new(300.0, 10.0)), Some(h.root_id()));
+    assert_eq!(
+        h.tree().hit_test(Point::new(300.0, 10.0)),
+        Some(h.root_id())
+    );
     h.feed(InputEvent::MousePressed { x: 300, y: 10 });
     h.feed(InputEvent::MouseReleased { x: 300, y: 10 });
     assert_eq!(h.clicks(), 0, "container hits are inert");
-    assert_eq!(h.tree().hit_test(Point::new(320.5, 10.0)), None, "outside the frame");
+    assert_eq!(
+        h.tree().hit_test(Point::new(320.5, 10.0)),
+        None,
+        "outside the frame"
+    );
 }
 
 /// Minimal test widget pinned to a fixed rect, for z-order assertions.
@@ -166,7 +203,10 @@ trait IntoFeedback {
 
 impl IntoFeedback for rt_gui::ButtonOutcome {
     fn into_feedback(self) -> rt_gui::WidgetFeedback {
-        rt_gui::WidgetFeedback { damage: self.damage.is_some(), clicked: self.clicked }
+        rt_gui::WidgetFeedback {
+            damage: self.damage.is_some(),
+            clicked: self.clicked,
+        }
     }
 }
 
@@ -178,7 +218,11 @@ fn layout_runs_at_most_once_per_cycle_and_before_paint() {
     // A clean tree relayouts for free: repeated paints add no damage.
     assert!(h.is_clean());
     assert!(!h.paint(), "no repaint without input or structural change");
-    assert_eq!(h.rect_of(ids[0]), Some(r0_before), "geometry stable across cycles");
+    assert_eq!(
+        h.rect_of(ids[0]),
+        Some(r0_before),
+        "geometry stable across cycles"
+    );
 
     // A structural change dirties layout; the NEXT paint picks it up and the
     // changed rects invalidate damage.
@@ -194,16 +238,26 @@ fn layout_runs_at_most_once_per_cycle_and_before_paint() {
 fn resize_forces_relayout_and_marks_damage() {
     let (mut h, ids) = column_of_three();
     let r0 = h.rect_of(ids[0]).unwrap();
-    h.feed(InputEvent::Resized { width: 500, height: 300 });
+    h.feed(InputEvent::Resized {
+        width: 500,
+        height: 300,
+    });
     assert!(h.is_dirty(), "resize invalidates everything");
     assert!(h.paint());
-    assert_eq!(h.rect_of(ids[0]), Some(r0), "padding-anchored first button unchanged");
+    assert_eq!(
+        h.rect_of(ids[0]),
+        Some(r0),
+        "padding-anchored first button unchanged"
+    );
     assert_eq!(h.frame().len(), 500 * 300, "frame reallocated");
     assert!(h.is_clean());
 
     // A second resize that leaves geometry unchanged still repaints once
     // (conservative invalidation), then settles.
-    h.feed(InputEvent::Resized { width: 500, height: 300 });
+    h.feed(InputEvent::Resized {
+        width: 500,
+        height: 300,
+    });
     assert!(h.paint());
     assert!(!h.paint());
 }

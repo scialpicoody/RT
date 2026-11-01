@@ -36,12 +36,8 @@ impl InputTranslator {
     /// Translate one window event, or `None` when it carries no input we act on.
     pub fn translate(&mut self, event: &WindowEvent) -> Option<InputEvent> {
         match event {
-            WindowEvent::CursorMoved { position, .. } => {
-                Some(self.cursor_moved(*position))
-            }
-            WindowEvent::MouseInput { state, button, .. } => {
-                self.mouse_input(*state, *button)
-            }
+            WindowEvent::CursorMoved { position, .. } => Some(self.cursor_moved(*position)),
+            WindowEvent::MouseInput { state, button, .. } => self.mouse_input(*state, *button),
             WindowEvent::CloseRequested => Some(InputEvent::CloseRequested),
             WindowEvent::Resized(size) => Some(InputEvent::Resized {
                 width: size.width,
