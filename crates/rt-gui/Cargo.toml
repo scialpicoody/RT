@@ -13,7 +13,14 @@ softbuffer = "0.4"
 vello_cpu = "0.3"
 parley = "0.12"
 taffy = "0.15"
+wgpu = { version = "30", optional = true }
 
 [features]
+# GPU presentation (ticket #23): presents the CPU-rasterized frame through a
+# wgpu surface (blit to the swapchain) when an adapter is available; CPU
+# softbuffer presentation stays the default and the fallback. Rasterization
+# is always vello_cpu — one engine representation, no widget change.
+gpu = ["dep:wgpu"]
+
 # Forwards rt-core's by-name path to this crate's examples/tests.
 dynamic-invoke = ["rt-core/dynamic-invoke"]

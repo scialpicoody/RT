@@ -1,8 +1,19 @@
 //! The `run_window` presenter (spec #16 decision 7, ticket #22): one call owns
 //! the whole windowed-app structure — windowing on the main thread, the RT
 //! loop on its own thread, input marshalled as typed messages, frames returned
-//! for CPU presentation (vello_cpu → softbuffer), and the close-requested
-//! confirmation chain with quit-code propagation.
+//! for presentation (wgpu surface behind the `gpu` feature, vello_cpu →
+//! softbuffer otherwise), and the close-requested confirmation chain with
+//! quit-code propagation.
+//!
+//! # Backend selection (ticket #23)
+//!
+//! Rasterization is always vello_cpu — one engine representation, no widget
+//! or application change. With the `gpu` feature enabled, the presenter
+//! probes for a wgpu adapter at startup and presents the painted frame
+//! through a wgpu surface (blit to the swapchain); probe failure is silent
+//! and any wgpu error mid-run permanently falls back to CPU presentation.
+//! Without the feature (the default), everything is CPU: vello_cpu →
+//! softbuffer.
 //!
 //! # Contract (ADR 0003)
 //!
@@ -17,11 +28,11 @@
 
 #![forbid(unsafe_code)]
 
-use std::num::NonZeroU32;
 use std::marker::PhantomData;
-use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::num::NonZeroU32;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender, channel};
 
 use rt_app::{App, AppHandle, Application, Ctx, TimerId};
 use rt_core::{Handle, Hub, RegistryBuilder};
@@ -33,7 +44,9 @@ use winit::window::{Window as PlatformWindow, WindowAttributes, WindowId};
 
 use crate::gui::Gui;
 use crate::input::{InputEvent, InputTranslator};
-use crate::window::{apply_window_event, register as register_window_object, CloseState, Window, WindowEvent};
+use crate::window::{
+    CloseState, Window, WindowEvent, apply_window_event, register as register_window_object,
+};
 
 /// One marshalled message delivered to
 /// [`WindowApplication::on_window_message`]: a window-level event, a
@@ -204,7 +217,12 @@ pub trait WindowApplication<T: Send + 'static>: Send + 'static {
 
     /// A timer armed through [`Ctx::after`](rt_app::Ctx::after) /
     /// [`Ctx::every`](rt_app::Ctx::every) fired.
-    fn on_window_timer(&mut self, ctx: &mut Ctx<WindowMsg<T>>, timer: TimerId, shell: &mut WindowShell) {
+    fn on_window_timer(
+        &mut self,
+        ctx: &mut Ctx<WindowMsg<T>>,
+        timer: TimerId,
+        shell: &mut WindowShell,
+    ) {
         let _ = (ctx, timer, shell);
     }
 
@@ -221,7 +239,9 @@ pub trait WindowApplication<T: Send + 'static>: Send + 'static {
 /// live on the main thread (winit owns it), the RT loop runs on its own
 /// thread with the [`WindowShell`], platform input is marshalled as
 /// [`WindowMsg`]s through the `rt_app` inbox, and painted frames come back
-/// for CPU presentation (vello_cpu → softbuffer).
+/// for presentation — through a wgpu surface when the `gpu` feature is on
+/// and an adapter is available, through softbuffer otherwise. The choice is
+/// made at runtime inside this call and is invisible to application code.
 ///
 /// `bootstrap` runs once on the loop thread before the cycle loop starts:
 /// insert objects into the Hub ([`WindowShell::hub_mut`]), register object
@@ -308,7 +328,10 @@ pub fn run_window<T: Send + 'static, A: WindowApplication<T>>(
         code_rx,
         final_code: None,
         window: None,
+        context: None,
         surface: None,
+        #[cfg(feature = "gpu")]
+        gpu: None,
         translator: InputTranslator::new(),
     };
     let _ = event_loop.run_app(&mut main);
@@ -316,9 +339,7 @@ pub fn run_window<T: Send + 'static, A: WindowApplication<T>>(
     let code = main
         .final_code
         .expect("rt-gui: rt loop sent no quit code before the loop exited");
-    loop_thread
-        .join()
-        .expect("rt-gui: rt loop thread panicked");
+    loop_thread.join().expect("rt-gui: rt loop thread panicked");
     code
 }
 
@@ -401,9 +422,13 @@ where
     }
 }
 
-/// Main-thread side: owns the platform window + softbuffer surface,
-/// translates winit events into [`WindowMsg`]s, and presents the latest
-/// loop-thread frame on redraw.
+/// Main-thread side: owns the platform window + presentation, translates
+/// winit events into [`WindowMsg`]s, and presents the latest loop-thread
+/// frame on redraw. Presentation backend: wgpu surface behind the `gpu`
+/// feature (probe at resume), softbuffer otherwise — and softbuffer is
+/// created lazily at first CPU present, so a healthy GPU path never touches
+/// it (on macOS both attach a layer to the same view; the fallback case is
+/// exactly the case where softbuffer must be the last creator).
 struct MainThreadPresenter<T> {
     handle: Arc<AppHandle<WindowMsg<T>>>,
     title: String,
@@ -413,7 +438,12 @@ struct MainThreadPresenter<T> {
     code_rx: Receiver<i32>,
     final_code: Option<i32>,
     window: Option<Arc<PlatformWindow>>,
+    context: Option<softbuffer::Context<Arc<PlatformWindow>>>,
     surface: Option<softbuffer::Surface<Arc<PlatformWindow>, Arc<PlatformWindow>>>,
+    /// GPU presentation; `None` once the probe failed or wgpu errored —
+    /// the CPU path takes over permanently from that frame on.
+    #[cfg(feature = "gpu")]
+    gpu: Option<crate::gpu::GpuPresenter>,
     translator: InputTranslator,
 }
 
@@ -421,7 +451,7 @@ impl<T: Send + 'static> MainThreadPresenter<T> {
     /// Present the latest loop-thread frame: drain the channel, keep last —
     /// intermediate frames are stale by definition.
     fn present_latest(&mut self) {
-        let Some(window) = &self.window else {
+        let Some(window) = self.window.clone() else {
             return;
         };
         let mut latest = None;
@@ -437,10 +467,41 @@ impl<T: Send + 'static> MainThreadPresenter<T> {
         else {
             return;
         };
+        #[cfg(feature = "gpu")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            if gpu.present(&frame, width, height) {
+                return;
+            }
+            // wgpu failed (already logged inside): CPU presentation takes
+            // over permanently.
+            self.gpu = None;
+        }
+        self.present_latest_cpu(window, frame, width, height);
+    }
+
+    /// The CPU presentation path: softbuffer surface, created lazily so a
+    /// healthy GPU path never creates one (see the struct doc).
+    fn present_latest_cpu(
+        &mut self,
+        window: Arc<PlatformWindow>,
+        frame: Vec<u32>,
+        width: NonZeroU32,
+        height: NonZeroU32,
+    ) {
+        if self.surface.is_none() {
+            let context =
+                softbuffer::Context::new(window.clone()).expect("rt-gui: softbuffer context");
+            let surface = softbuffer::Surface::new(&context, window.clone())
+                .expect("rt-gui: softbuffer surface");
+            self.context = Some(context);
+            self.surface = Some(surface);
+        }
         let Some(surface) = self.surface.as_mut() else {
             return;
         };
-        surface.resize(width, height).expect("rt-gui: surface resize");
+        surface
+            .resize(width, height)
+            .expect("rt-gui: surface resize");
         let mut buffer = surface.buffer_mut().expect("rt-gui: surface buffer");
         if buffer.len() == frame.len() {
             buffer.copy_from_slice(&frame);
@@ -461,18 +522,20 @@ impl<T: Send + 'static> ApplicationHandler<()> for MainThreadPresenter<T> {
         let size = window.inner_size();
         let scale_factor = window.scale_factor();
         let window = Arc::new(window);
-        let context = softbuffer::Context::new(window.clone()).expect("rt-gui: softbuffer context");
-        let surface =
-            softbuffer::Surface::new(&context, window.clone()).expect("rt-gui: softbuffer surface");
-        self.surface = Some(surface);
+        // softbuffer stays uninitialized here (created lazily at first CPU
+        // present); with the `gpu` feature, probe the wgpu adapter now —
+        // failure is silent and leaves everything on the CPU path.
+        #[cfg(feature = "gpu")]
+        {
+            self.gpu = crate::gpu::GpuPresenter::new(&window);
+        }
         self.window = Some(window);
         // Sync the loop-thread Window object with the real platform window;
         // the resize message also drives the first paint once the loop pumps.
-        self.handle
-            .send(WindowMsg::Window(WindowEvent::Resized {
-                width: size.width,
-                height: size.height,
-            }));
+        self.handle.send(WindowMsg::Window(WindowEvent::Resized {
+            width: size.width,
+            height: size.height,
+        }));
         self.handle
             .send(WindowMsg::Window(WindowEvent::ScaleFactorChanged(
                 scale_factor,
@@ -489,11 +552,10 @@ impl<T: Send + 'static> ApplicationHandler<()> for MainThreadPresenter<T> {
             PlatformWindowEvent::RedrawRequested => self.present_latest(),
             PlatformWindowEvent::Resized(size) => {
                 if size.width > 0 && size.height > 0 {
-                    self.handle
-                        .send(WindowMsg::Window(WindowEvent::Resized {
-                            width: size.width,
-                            height: size.height,
-                        }));
+                    self.handle.send(WindowMsg::Window(WindowEvent::Resized {
+                        width: size.width,
+                        height: size.height,
+                    }));
                 }
             }
             PlatformWindowEvent::ScaleFactorChanged { scale_factor, .. } => {
@@ -535,7 +597,7 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    use rt_core::{object_impl, Object};
+    use rt_core::{Object, object_impl};
 
     use crate::input::InputEvent;
 
@@ -695,7 +757,10 @@ mod tests {
                     frame.len(),
                     (shell.window().width() * shell.window().height()) as usize
                 );
-                assert!(distinct_colors(frame) > 1, "frame must show painted content");
+                assert!(
+                    distinct_colors(frame) > 1,
+                    "frame must show painted content"
+                );
             }
         }
 
@@ -804,7 +869,12 @@ mod tests {
             }
         }
 
-        fn on_window_cycle(&mut self, _ctx: &mut Ctx<WindowMsg<TestMsg>>, _shell: &mut WindowShell) {}
+        fn on_window_cycle(
+            &mut self,
+            _ctx: &mut Ctx<WindowMsg<TestMsg>>,
+            _shell: &mut WindowShell,
+        ) {
+        }
     }
 
     #[test]
