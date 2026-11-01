@@ -2,7 +2,7 @@
 //! are hard errors, lookups only afterwards.
 
 use core::any::TypeId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::meta::MetaObject;
 use crate::Object;
@@ -25,9 +25,10 @@ impl RegistryBuilder {
 
     /// Register one kind of object; chainable.
     ///
-    /// Panics when the same type is registered twice or two distinct types
-    /// share a name — hard startup errors by design (ADR 0002), never
-    /// last-write-wins.
+    /// Panics when the same type is registered twice, two distinct types
+    /// share a name, or a member name (signal, slot, or property) appears at
+    /// two levels of the type's parent chain — hard startup errors by design
+    /// (ADR 0002), never last-write-wins.
     pub fn register<T: Object + 'static>(&mut self) -> &mut Self {
         let meta = T::meta();
         if self.by_type_id.contains_key(&TypeId::of::<T>()) {
@@ -39,6 +40,7 @@ impl RegistryBuilder {
                 meta.type_name
             );
         }
+        check_chain_shadowing(meta);
         self.by_type_id.insert(TypeId::of::<T>(), meta);
         self.by_name.insert(meta.type_name, meta);
         self
@@ -50,6 +52,43 @@ impl RegistryBuilder {
             by_type_id: std::mem::take(&mut self.by_type_id),
             by_name: std::mem::take(&mut self.by_name),
         }
+    }
+}
+
+/// The duplicate-name rule extended across the inheritance chain: a member
+/// name redeclared at a younger level shadows nothing — it is a hard startup
+/// error, per kind (signals, slots, properties).
+fn check_chain_shadowing(meta: &'static MetaObject) {
+    let mut signals = HashSet::new();
+    let mut slots = HashSet::new();
+    let mut properties = HashSet::new();
+    let mut level = Some(meta);
+    while let Some(current) = level {
+        for signal in current.signals {
+            if !signals.insert(signal.name) {
+                panic!(
+                    "rt-core registry: duplicate signal '{}' across the inheritance chain of '{}'",
+                    signal.name, meta.type_name
+                );
+            }
+        }
+        for slot in current.slots {
+            if !slots.insert(slot.name) {
+                panic!(
+                    "rt-core registry: duplicate slot '{}' across the inheritance chain of '{}'",
+                    slot.name, meta.type_name
+                );
+            }
+        }
+        for property in current.properties {
+            if !properties.insert(property.name) {
+                panic!(
+                    "rt-core registry: duplicate property '{}' across the inheritance chain of '{}'",
+                    property.name, meta.type_name
+                );
+            }
+        }
+        level = current.parent_meta();
     }
 }
 

@@ -178,6 +178,7 @@ impl Element {}
 #[derive(Object)]
 #[object(parent = Element)]
 struct Button {
+    parent: Element,
     #[property]
     pressed: Property<bool>,
 }
@@ -190,7 +191,9 @@ impl Button {
 
 #[derive(Object)]
 #[object(parent = Button)]
-struct Toggle3D;
+struct Toggle3D {
+    parent: Button,
+}
 
 #[object_impl]
 impl Toggle3D {}
@@ -216,8 +219,47 @@ fn parent_chain_walks_to_the_root() {
 }
 
 #[test]
-fn parent_link_does_not_merge_members() {
+fn parent_members_merge_with_offset_indices() {
+    // Own members keep their own-space indices.
     assert_eq!(Button::meta().signals.len(), 1);
-    assert!(Element::meta().signals.is_empty());
-    assert!(Toggle3D::meta().properties.is_empty());
+    assert_eq!(
+        Button::meta().find_signal_merged("toggled"),
+        Some((
+            0,
+            &Button::meta().signals[0] as &rt_core::SignalDescriptor
+        ))
+    );
+
+    // Inherited signal: the ancestor level appends after the younger
+    // levels' signal counts.
+    let (index, signal) = Toggle3D::meta()
+        .find_signal_merged("toggled")
+        .expect("inherited signal merges");
+    assert_eq!(index, 0); // Toggle3D owns no signals
+    assert_eq!(signal.name, "toggled");
+    assert!(Toggle3D::meta().find_signal_merged("absent").is_none());
+
+    // Inherited property: Button's whole signal+property space appends
+    // before its own property indices.
+    let (property_index, descriptor) = Toggle3D::meta()
+        .find_property_merged("pressed")
+        .expect("inherited property merges");
+    assert_eq!(
+        property_index,
+        (Toggle3D::meta().signals.len()
+            + Toggle3D::meta().properties.len()
+            + Button::meta().signals.len()) as u32
+    );
+    assert_eq!(descriptor.name, "pressed");
+
+    // Slots: Toggle3D has none anywhere on its chain; the resolved level is
+    // its own when it did.
+    assert!(Toggle3D::meta().find_slot_merged("anything").is_none());
+
+    // A two-level chain still resolves the grandparent level's members with
+    // the accumulated offsets (Element contributes no members).
+    let (index_from_button, _) = Button::meta()
+        .find_property_merged("pressed")
+        .expect("own property merges");
+    assert_eq!(index_from_button, Button::meta().signals.len() as u32);
 }

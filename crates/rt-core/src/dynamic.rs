@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use crate::audit::TraceEvent;
 use crate::handle::{ConnectionId, Handle};
-use crate::meta::MetaObject;
+use crate::meta::{MetaObject, SlotRoute};
 use crate::property::CloneAny;
 use crate::registry::Registry;
 use crate::signal::Hub;
@@ -74,20 +74,17 @@ impl Dynamic<'_> {
         &mut self,
         meta: &'static MetaObject,
         signal_name: &'static str,
-    ) -> Result<(u32, usize), DynamicError> {
-        let position = meta.signals.iter().position(|s| s.name == signal_name);
+    ) -> Result<(u32, usize, &'static crate::meta::SignalDescriptor), DynamicError> {
+        let merged = meta.find_signal_merged(signal_name);
         self.hub.trace_event(TraceEvent::DynamicLookup {
             name: signal_name,
-            resolved: position.is_some(),
+            resolved: merged.is_some(),
         });
-        let Some(position) = position else {
-            return Err(DynamicError::UnknownSignal {
-                owner: meta.type_name,
-                signal: signal_name,
-            });
-        };
-        let arity = meta.signals[position].args.len();
-        Ok((position as u32, arity))
+        let (index, signal) = merged.ok_or(DynamicError::UnknownSignal {
+            owner: meta.type_name,
+            signal: signal_name,
+        })?;
+        Ok((index, signal.args.len(), signal))
     }
 
     /// Connect `emitter.signal_name` to `receiver.slot_name`, both resolved
@@ -103,29 +100,27 @@ impl Dynamic<'_> {
         let (emitter_meta, emitter_type) = self.meta_of(emitter, signal_name)?;
         let (receiver_meta, receiver_type) = self.meta_of(receiver, slot_name)?;
 
-        let (signal_index, signal_arity) = self.find_signal(emitter_meta, signal_name)?;
+        let (signal_index, signal_arity, _) = self.find_signal(emitter_meta, signal_name)?;
 
-        let invoker = receiver_meta
-            .slot_invokers
-            .iter()
-            .find(|(name, _)| *name == slot_name)
-            .map(|(_, invoker)| *invoker);
-        let slot_arity = receiver_meta
-            .slots
-            .iter()
-            .find(|s| s.name == slot_name)
-            .map(|s| s.args.len());
+        let merged_slot = receiver_meta.find_slot_merged(slot_name);
+        let invoker = receiver_meta.slot_invoker_merged(slot_name);
         self.hub.trace_event(TraceEvent::DynamicLookup {
             name: slot_name,
-            resolved: invoker.is_some(),
+            resolved: invoker.is_some() && merged_slot.is_some(),
         });
+        let Some((slot, up)) = merged_slot else {
+            return Err(DynamicError::UnknownSlot {
+                owner: receiver_meta.type_name,
+                slot: slot_name,
+            });
+        };
         let Some(invoker) = invoker else {
             return Err(DynamicError::UnknownSlot {
                 owner: receiver_meta.type_name,
                 slot: slot_name,
             });
         };
-        if Some(signal_arity) != slot_arity {
+        if signal_arity != slot.args.len() {
             return Err(DynamicError::ArityMismatch {
                 owner: emitter_meta.type_name,
                 signal: signal_name,
@@ -135,8 +130,14 @@ impl Dynamic<'_> {
 
         // The invoker hands back the slot's return value; queued and direct
         // deliveries discard it, so adapt to the unit-returning erased call.
+        // An inherited slot (level > 0) resolves its receiver through the
+        // derived type's parent route before the owner's invoker downcasts.
+        let route = SlotRoute {
+            route: receiver_meta.parent_route,
+            up,
+        };
         let call: crate::signal::ErasedCall = Rc::new(move |recv, payload| {
-            invoker(recv, payload);
+            invoker(recv, payload, route);
         });
         Ok(self.hub.store_connection(
             emitter,
@@ -159,9 +160,7 @@ impl Dynamic<'_> {
         payload: Box<dyn CloneAny>,
     ) -> Result<usize, DynamicError> {
         let (meta, emitter_type) = self.meta_of(emitter, signal_name)?;
-        let (signal_index, _arity) = self.find_signal(meta, signal_name)?;
-
-        let signal = &meta.signals[signal_index as usize];
+        let (signal_index, _arity, signal) = self.find_signal(meta, signal_name)?;
         if (*payload.clone_any()).type_id() != signal.payload.id {
             return Err(DynamicError::PayloadMismatch {
                 expected: signal.payload.name,
@@ -185,17 +184,13 @@ impl Dynamic<'_> {
     ) -> Result<Option<Box<dyn Any>>, DynamicError> {
         let (meta, _) = self.meta_of(receiver, slot_name)?;
 
-        let slot = meta.slots.iter().find(|s| s.name == slot_name);
-        let invoker = meta
-            .slot_invokers
-            .iter()
-            .find(|(name, _)| *name == slot_name)
-            .map(|(_, invoker)| *invoker);
+        let merged_slot = meta.find_slot_merged(slot_name);
+        let invoker = meta.slot_invoker_merged(slot_name);
         self.hub.trace_event(TraceEvent::DynamicLookup {
             name: slot_name,
-            resolved: slot.is_some() && invoker.is_some(),
+            resolved: merged_slot.is_some() && invoker.is_some(),
         });
-        let Some(slot) = slot else {
+        let Some((slot, up)) = merged_slot else {
             return Err(DynamicError::UnknownSlot {
                 owner: meta.type_name,
                 slot: slot_name,
@@ -219,7 +214,11 @@ impl Dynamic<'_> {
             });
             return Err(DynamicError::StaleHandle { name: slot_name });
         };
-        Ok(invoker(&mut **value, payload.clone_any()))
+        let route = SlotRoute {
+            route: meta.parent_route,
+            up,
+        };
+        Ok(invoker(&mut **value, payload.clone_any(), route))
     }
 
     /// Read `handle.property_name` erased. Every lookup is traced.
@@ -229,7 +228,9 @@ impl Dynamic<'_> {
         property_name: &'static str,
     ) -> Result<Option<Box<dyn Any>>, DynamicError> {
         let (meta, _) = self.meta_of(handle, property_name)?;
-        let descriptor = meta.properties.iter().find(|p| p.name == property_name);
+        let descriptor = meta
+            .find_property_merged(property_name)
+            .map(|(_, descriptor)| descriptor);
         self.hub.trace_event(TraceEvent::DynamicLookup {
             name: property_name,
             resolved: descriptor.is_some(),
@@ -263,7 +264,9 @@ impl Dynamic<'_> {
         value: Box<dyn CloneAny>,
     ) -> Result<(), DynamicError> {
         let (meta, _) = self.meta_of(handle, property_name)?;
-        let descriptor = meta.properties.iter().find(|p| p.name == property_name);
+        let descriptor = meta
+            .find_property_merged(property_name)
+            .map(|(_, descriptor)| descriptor);
         self.hub.trace_event(TraceEvent::DynamicLookup {
             name: property_name,
             resolved: descriptor.is_some(),

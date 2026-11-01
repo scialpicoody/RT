@@ -319,40 +319,30 @@ fn slot_descriptor(
         }
     };
     let call_site = quote! { Self::#adapter_name(recv, arg) };
-    let wrapper = if returns_value {
-        quote! {
-            #[doc = "By-name invoker (feature `dynamic-invoke`); not typed API."]
-            #[doc(hidden)]
-            pub fn #wrapper_name(
-                recv: &mut dyn ::core::any::Any,
-                boxed: ::std::boxed::Box<dyn ::core::any::Any>,
-            ) -> ::std::option::Option<::std::boxed::Box<dyn ::core::any::Any>> {
-                let recv = recv
-                    .downcast_mut::<#self_ty>()
-                    .expect("rt: receiver type mismatch");
-                let arg = *boxed
-                    .downcast::<#payload_ty>()
-                    .expect("rt: by-name payload mismatch");
-                Some(::std::boxed::Box::new(#call_site))
-            }
-        }
+    let call_expr = if returns_value {
+        quote! { Some(::std::boxed::Box::new(#call_site)) }
     } else {
         quote! {
-            #[doc = "By-name invoker (feature `dynamic-invoke`); not typed API."]
-            #[doc(hidden)]
-            pub fn #wrapper_name(
-                recv: &mut dyn ::core::any::Any,
-                boxed: ::std::boxed::Box<dyn ::core::any::Any>,
-            ) -> ::std::option::Option<::std::boxed::Box<dyn ::core::any::Any>> {
-                let recv = recv
-                    .downcast_mut::<#self_ty>()
-                    .expect("rt: receiver type mismatch");
-                let arg = *boxed
-                    .downcast::<#payload_ty>()
-                    .expect("rt: by-name payload mismatch");
-                #call_site;
-                None
-            }
+            #call_site;
+            None
+        }
+    };
+    let wrapper = quote! {
+        #[doc = "By-name invoker (feature `dynamic-invoke`); not typed API."]
+        #[doc(hidden)]
+        pub fn #wrapper_name(
+            recv: &mut dyn ::core::any::Any,
+            boxed: ::std::boxed::Box<dyn ::core::any::Any>,
+            route: ::rt_core::meta::SlotRoute,
+        ) -> ::std::option::Option<::std::boxed::Box<dyn ::core::any::Any>> {
+            let recv = ::rt_core::meta::SlotRoute::resolve(route, recv);
+            let recv = recv
+                .downcast_mut::<#self_ty>()
+                .expect("rt: receiver type mismatch");
+            let arg = *boxed
+                .downcast::<#payload_ty>()
+                .expect("rt: by-name payload mismatch");
+            #call_expr
         }
     };
     let descriptor = quote! {
