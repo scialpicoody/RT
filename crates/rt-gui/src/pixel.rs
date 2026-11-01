@@ -1,75 +1,79 @@
-//! Pure pixel conversion between [`Rgb888`] and softbuffer's `u32` layout,
-//! plus [`BufferTarget`], the [`DrawTarget`] adapter over `&mut [u32]`.
+//! Pixel conversion between the engine's colors and softbuffer's `u32`
+//! layout, plus the row-major RGBA8 → frame conversion used after
+//! rasterization.
 //!
 //! These are the only pixel-format-sensitive items in the crate: everything
-//! else draws through `embedded_graphics` in `Rgb888`.
+//! else paints through the vello family (`Painter` → `vello_cpu`), and the
+//! rasterized premultiplied RGBA8 output lands here on its way into the
+//! softbuffer-presented frame.
 
-use embedded_graphics::geometry::{OriginDimensions, Point, Size};
-use embedded_graphics::pixelcolor::Rgb888;
-use embedded_graphics::prelude::{DrawTarget, RgbColor};
-use embedded_graphics::Pixel;
+use vello_cpu::peniko::Color;
 
-/// Convert `color` to softbuffer's documented pixel layout:
+/// Convert RGB channels to softbuffer's documented pixel layout:
 /// `00000000 RRRRRRRR GGGGGGGG BBBBBBBB` (top byte zero).
 ///
 /// Platform byte-order quirks are handled inside softbuffer itself, so this
 /// mapping is platform-independent.
-pub fn rgb888_to_u32(color: Rgb888) -> u32 {
-    (u32::from(color.r()) << 16) | (u32::from(color.g()) << 8) | u32::from(color.b())
+pub fn rgb_to_u32(r: u8, g: u8, b: u8) -> u32 {
+    (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)
 }
 
-/// A [`DrawTarget`] over a `u32` pixel buffer in softbuffer layout.
+/// Convert a [`Color`] to the `u32` frame layout.
 ///
-/// Rows are laid out consecutively (row-major); out-of-bounds pixels are
-/// clipped.
-pub struct BufferTarget<'a> {
-    buffer: &'a mut [u32],
-    size: Size,
+/// The frame is opaque (alpha is dropped); premultiplied channels over the
+/// black background mean the stored RGB is the on-screen color, so partial
+/// coverage (antialiased edges) darkens toward black exactly like the
+/// zeroed frame behind it.
+pub fn color_to_u32(color: Color) -> u32 {
+    // Premultiplied components; the frame is opaque, so partial coverage
+    // darkens toward black exactly like the zeroed frame behind it.
+    let quantize = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let [r, g, b, _] = color.components;
+    rgb_to_u32(quantize(r), quantize(g), quantize(b))
 }
 
-impl<'a> BufferTarget<'a> {
-    /// Wrap `buffer` (row-major, `size` pixels wide) as a draw target.
-    pub fn new(buffer: &'a mut [u32], size: Size) -> Self {
-        Self { buffer, size }
-    }
-
-    /// The raw pixels, for tests and diagnostics.
-    pub fn as_slice(&self) -> &[u32] {
-        self.buffer
-    }
-}
-
-impl DrawTarget for BufferTarget<'_> {
-    type Color = Rgb888;
-    type Error = core::convert::Infallible;
-
-    fn draw_iter<I: IntoIterator<Item = Pixel<Rgb888>>>(
-        &mut self,
-        pixels: I,
-    ) -> Result<(), Self::Error> {
-        for Pixel(pos, color) in pixels {
-            if let Some(index) = index_of(pos, self.size) {
-                self.buffer[index] = rgb888_to_u32(color);
-            }
-        }
-        Ok(())
+/// Convert a rasterized premultiplied RGBA8 buffer (row-major, 4 bytes per
+/// pixel) into the `u32` frame layout. Partial-alpha pixels composite onto
+/// black (the cleared frame color), matching the softbuffer contract that
+/// the top byte stays zero.
+pub(crate) fn premul_rgba8_to_frame(rgba: &[u8], frame: &mut [u32]) {
+    assert_eq!(
+        rgba.len(),
+        frame.len() * 4,
+        "RGBA scratch buffer must match the frame"
+    );
+    for (i, pixel) in frame.iter_mut().enumerate() {
+        let j = i * 4;
+        *pixel = rgb_to_u32(rgba[j], rgba[j + 1], rgba[j + 2]);
     }
 }
 
-impl OriginDimensions for BufferTarget<'_> {
-    fn size(&self) -> Size {
-        self.size
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Row-major index of `pos` inside a `size` target, or `None` if outside.
-fn index_of(pos: Point, size: Size) -> Option<usize> {
-    if pos.x < 0 || pos.y < 0 {
-        return None;
+    #[test]
+    fn rgb_to_u32_matches_the_documented_layout() {
+        assert_eq!(rgb_to_u32(0x00, 0x00, 0x00), 0x0000_0000);
+        assert_eq!(rgb_to_u32(0xFF, 0xFF, 0xFF), 0x00FF_FFFF);
+        assert_eq!(rgb_to_u32(0xFF, 0x00, 0x00), 0x00FF_0000);
+        assert_eq!(rgb_to_u32(0x00, 0xFF, 0x00), 0x0000_FF00);
+        assert_eq!(rgb_to_u32(0x00, 0x00, 0xFF), 0x0000_00FF);
+        assert_eq!(rgb_to_u32(0x12, 0x34, 0x56), 0x0012_3456);
     }
-    let (x, y) = (pos.x as u32, pos.y as u32);
-    if x >= size.width || y >= size.height {
-        return None;
+
+    #[test]
+    fn color_conversion_is_lossless_for_opaque_colors() {
+        assert_eq!(color_to_u32(Color::from_rgb8(0x12, 0x34, 0x56)), 0x0012_3456);
     }
-    Some((y * size.width + x) as usize)
+
+    #[test]
+    fn premul_rgba_conversion_drops_alpha_and_keeps_channels() {
+        let mut frame = [0u32; 2];
+        premul_rgba8_to_frame(
+            &[0x12, 0x34, 0x56, 0xFF, 0xAB, 0xCD, 0xEF, 0x80],
+            &mut frame,
+        );
+        assert_eq!(frame, [0x0012_3456, 0x00AB_CDEF]);
+    }
 }

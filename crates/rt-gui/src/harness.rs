@@ -3,12 +3,11 @@
 //! the painted `u32` frame, the damage state, and widget outcomes — no real
 //! window anywhere.
 //!
-//! TEST SUPPORT ONLY: this module exists so tests (and the later engine
-//! cutover, ticket #20) can prove behavior parity through one explicit seam.
-//! It is not part of the runtime surface and adds no dependencies.
+//! TEST SUPPORT ONLY: this module exists so tests can prove behavior parity
+//! through one explicit seam. It is not part of the runtime surface and adds
+//! no dependencies.
 
-use embedded_graphics::geometry::{Point, Size};
-use embedded_graphics::primitives::Rectangle;
+use vello_cpu::kurbo::{Point, Rect};
 
 use crate::gui::Gui;
 use crate::input::InputEvent;
@@ -17,10 +16,10 @@ use crate::input::InputEvent;
 ///
 /// The harness keeps the last painted frame so assertions can inspect pixels
 /// after paint, mirroring what presentation would have flushed to a surface.
-#[derive(Debug)]
 pub struct Harness {
     gui: Gui,
-    size: Size,
+    width: u32,
+    height: u32,
     frame: Vec<u32>,
     painted: bool,
     /// Whether each fed event scheduled a repaint, in feed order.
@@ -33,7 +32,8 @@ impl Harness {
     pub fn new(width: u32, height: u32) -> Self {
         Self {
             gui: Gui::new(width, height),
-            size: Size::new(width, height),
+            width,
+            height,
             frame: vec![0; (width * height) as usize],
             painted: false,
             schedule_log: Vec::new(),
@@ -43,7 +43,8 @@ impl Harness {
     /// Feed one input event and record whether it scheduled a repaint.
     pub fn feed(&mut self, event: InputEvent) -> bool {
         if let InputEvent::Resized { width, height } = event {
-            self.size = Size::new(width, height);
+            self.width = width;
+            self.height = height;
         }
         let scheduled = self.gui.handle_input(&event);
         self.schedule_log.push(scheduled);
@@ -76,7 +77,7 @@ impl Harness {
     /// Panics when out of bounds or before the first paint.
     pub fn pixel(&self, x: u32, y: u32) -> u32 {
         assert!(self.painted, "pixel before the first paint");
-        self.frame[(y * self.size.width + x) as usize]
+        self.frame[(y * self.width + x) as usize]
     }
 
     /// The last painted frame, row-major in softbuffer pixel layout.
@@ -86,12 +87,12 @@ impl Harness {
 
     /// Window width in pixels.
     pub fn width(&self) -> u32 {
-        self.size.width
+        self.width
     }
 
     /// Window height in pixels.
     pub fn height(&self) -> u32 {
-        self.size.height
+        self.height
     }
 
     /// Whether any damage is pending (marked and not yet taken).
@@ -110,7 +111,7 @@ impl Harness {
     }
 
     /// The root button's rect, for locating synthetic input.
-    pub fn button_rect(&self) -> Rectangle {
+    pub fn button_rect(&self) -> Rect {
         self.gui.button_rect()
     }
 

@@ -3,18 +3,16 @@
 
 use rt_gui::harness::Harness;
 use rt_gui::{Button, InputEvent};
-
-use embedded_graphics::geometry::{Point, Size};
-use embedded_graphics::primitives::Rectangle;
+use vello_cpu::kurbo::Rect;
 
 /// Expected button body color for a given visual state, via the widget's own
 /// color contract (drive a detached button into the state).
 fn fill_in_state(events: &[InputEvent]) -> u32 {
-    let mut b = Button::new(Rectangle::new(Point::zero(), Size::new(1, 1)), "");
+    let mut b = Button::new(Rect::new(0.0, 0.0, 1.0, 1.0), "");
     for e in events {
         b.handle(e);
     }
-    rt_gui::rgb888_to_u32(b.fill_color())
+    rt_gui::color_to_u32(b.fill_color())
 }
 
 fn hovered_fill() -> u32 {
@@ -32,7 +30,7 @@ fn pressed_fill() -> u32 {
 fn input_paints_pixels_end_to_end() {
     let mut h = Harness::new(320, 240);
     let b = h.button_rect();
-    let (ix, iy) = ((b.top_left.x + 10) as u32, (b.top_left.y + 10) as u32);
+    let (ix, iy) = ((b.x0 as i32 + 10) as u32, (b.y0 as i32 + 10) as u32);
 
     assert!(h.paint(), "fresh state is dirty and paints");
     // Fresh paint: normal button fill inside, background outside.
@@ -42,7 +40,7 @@ fn input_paints_pixels_end_to_end() {
 
     // Hover marks damage; nothing repaints until paint is pumped.
     assert!(h.is_clean(), "previous paint took the damage");
-    assert!(h.feed(InputEvent::MouseMoved { x: b.top_left.x + 10, y: b.top_left.y + 10 }));
+    assert!(h.feed(InputEvent::MouseMoved { x: b.x0 as i32 + 10, y: b.y0 as i32 + 10 }));
     assert!(h.is_dirty(), "hover marked damage");
     assert!(h.paint(), "damage drives a repaint");
     assert!(h.is_clean(), "paint consumed the damage");
@@ -57,14 +55,14 @@ fn pressed_pixel_and_click_outcome_are_observable() {
     let (px, py) = (p.x as u32, p.y as u32);
     h.paint();
 
-    h.feed(InputEvent::MouseMoved { x: p.x, y: p.y });
-    h.feed(InputEvent::MousePressed { x: p.x, y: p.y });
+    h.feed(InputEvent::MouseMoved { x: p.x as i32, y: p.y as i32 });
+    h.feed(InputEvent::MousePressed { x: p.x as i32, y: p.y as i32 });
     assert!(h.is_dirty());
     assert!(h.paint());
     assert_eq!(h.pixel(px, py), pressed_fill(), "center pixel shows pressed fill");
     assert_eq!(h.clicks(), 0, "press alone is not a click");
 
-    h.feed(InputEvent::MouseReleased { x: p.x, y: p.y });
+    h.feed(InputEvent::MouseReleased { x: p.x as i32, y: p.y as i32 });
     assert!(h.is_dirty());
     assert!(h.paint());
     assert_eq!(h.clicks(), 1, "press+release inside is one click");
@@ -92,9 +90,9 @@ fn harness_sees_damage_mark_take_cycle_through_coalescing() {
 
     // Two hovers inside the button mark twice but coalesce: one repaint.
     let p = h.point_in_button();
-    h.feed(InputEvent::MouseMoved { x: p.x - 3, y: p.y });
+    h.feed(InputEvent::MouseMoved { x: p.x as i32 - 3, y: p.y as i32 });
     assert!(h.is_dirty());
-    h.feed(InputEvent::MouseMoved { x: p.x + 3, y: p.y });
+    h.feed(InputEvent::MouseMoved { x: p.x as i32 + 3, y: p.y as i32 });
     assert!(h.is_dirty(), "second mark still dirty until taken");
     h.paint();
     assert!(h.is_clean());
@@ -107,7 +105,7 @@ fn label_change_invalidates_and_repaints_through_the_harness() {
     let mut h = Harness::new(320, 240);
     let b = h.button_rect();
     h.paint();
-    let glyph_y = (b.top_left.y + b.size.height as i32 + 4) as u32;
+    let glyph_y = (b.y1 as i32 + 4) as u32;
     assert_eq!(h.pixel(50, glyph_y), 0, "no label painted yet");
     assert!(!h.feed(InputEvent::MouseMoved { x: 0, y: 0 }), "no-op hover outside");
     h.paint();

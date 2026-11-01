@@ -1,26 +1,25 @@
-//! The widget-root orchestrator: owns the frame buffer and the widget tree
-//! (one [`Button`] for now), routes [`InputEvent`]s into widgets, and paints
-//! coalesced damage into the frame at one point — `paint`.
+//! The widget-root orchestrator: owns the frame buffer, the vello paint
+//! engine ([`Painter`]), and the widget tree (one [`Button`] for now); routes
+//! [`InputEvent`]s into widgets, and paints coalesced damage into the frame
+//! at one point — `paint`.
 //!
 //! SEAM: with rt-core objects in the loop, input dispatch becomes typed
 //! signal emissions and `paint` is driven from the loop's Flush step; the
 //! widget-facing contract below stays the same.
 
-use embedded_graphics::geometry::{Point, Size};
-use embedded_graphics::mono_font::ascii::FONT_8X13;
-use embedded_graphics::text::Text;
-use embedded_graphics::primitives::Rectangle;
+use vello_cpu::kurbo::{Point, Rect};
 
 use crate::damage::Damage;
 use crate::input::InputEvent;
-use crate::pixel::BufferTarget;
+use crate::paint::{LABEL_COLOR, Painter};
 use crate::widget::Button;
 
 /// One window's widget root and frame, in softbuffer pixel layout.
-#[derive(Debug)]
 pub struct Gui {
-    size: Size,
+    width: u32,
+    height: u32,
     frame: Vec<u32>,
+    painter: Painter,
     button: Button,
     label: String,
     damage: Damage,
@@ -29,16 +28,18 @@ pub struct Gui {
 
 impl Gui {
     pub fn new(width: u32, height: u32) -> Self {
-        let size = Size::new(width, height);
+        let painter = Painter::new(width, height);
         let button = Button::new(
-            Rectangle::new(Point::new(40, 40), Size::new(160, 48)),
+            Rect::new(40.0, 40.0, 200.0, 88.0),
             "Press me",
         );
         let mut damage = Damage::new();
-        damage.mark_all(size);
+        damage.mark_all(width, height);
         Self {
-            size,
+            width,
+            height,
             frame: vec![0; (width * height) as usize],
+            painter,
             button,
             label: String::new(),
             damage,
@@ -50,7 +51,7 @@ impl Gui {
     /// everything (basic full repaint).
     pub fn set_label(&mut self, label: impl Into<String>) {
         self.label = label.into();
-        self.damage.mark_all(self.size);
+        self.damage.mark_all(self.width, self.height);
     }
 
     /// Feed one translated input event. Returns `true` when it scheduled new
@@ -58,9 +59,11 @@ impl Gui {
     pub fn handle_input(&mut self, event: &InputEvent) -> bool {
         match *event {
             InputEvent::Resized { width, height } => {
-                self.size = Size::new(width, height);
+                self.width = width;
+                self.height = height;
                 self.frame = vec![0; (width * height) as usize];
-                self.damage.mark_all(self.size);
+                self.painter.resize(width, height);
+                self.damage.mark_all(width, height);
                 true
             }
             InputEvent::CloseRequested => false,
@@ -80,30 +83,20 @@ impl Gui {
         }
     }
 
-    /// Paint when dirty: clears to the background and renders the widgets
-    /// into the frame. Returns the frame, or `None` when nothing is dirty.
-    /// (Full-frame repaint; the coalesced damage rect gates it.)
+    /// Paint when dirty: the widgets emit into the vello scene and the CPU
+    /// rasterizer turns it into the frame. Returns the frame, or `None` when
+    /// nothing is dirty. (Full-frame repaint; the coalesced damage rect
+    /// gates it.)
     pub fn paint(&mut self) -> Option<&[u32]> {
         self.damage.take()?;
-        self.frame.fill(0);
-        let size = self.size;
-        let mut target = BufferTarget::new(&mut self.frame, size);
-        self.button.render(&mut target).expect("infallible target");
-        let glyph = FONT_8X13.character_size;
-        let origin = Point::new(
-            self.button.rect().top_left.x,
-            self.button.rect().top_left.y + self.button.rect().size.height as i32 + glyph.height as i32,
-        );
-        use embedded_graphics::mono_font::MonoTextStyle;
-        use embedded_graphics::pixelcolor::Rgb888;
-        use embedded_graphics::prelude::*;
-        Text::new(
-            &self.label,
-            origin,
-            MonoTextStyle::new(&FONT_8X13, Rgb888::new(0x20, 0x20, 0x20)),
-        )
-        .draw(&mut target)
-        .expect("infallible target");
+        self.painter.begin_frame();
+        self.button.render(&mut self.painter);
+        if !self.label.is_empty() {
+            let b = self.button.rect();
+            let origin = Point::new(b.x0, b.y1 + 4.0);
+            self.painter.draw_label(&self.label, origin, LABEL_COLOR);
+        }
+        self.painter.render_into(&mut self.frame);
         Some(&self.frame)
     }
 
@@ -113,7 +106,7 @@ impl Gui {
     }
 
     /// The root button's rect (test seam).
-    pub fn button_rect(&self) -> Rectangle {
+    pub fn button_rect(&self) -> Rect {
         self.button.rect()
     }
 

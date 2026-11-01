@@ -61,7 +61,7 @@ impl Recorder {
 
 fn click_inside(gui: &Gui) -> Vec<InputEvent> {
     let b = gui.button_rect();
-    let (x, y) = (b.top_left.x + 5, b.top_left.y + 5);
+    let (x, y) = (b.x0 as i32 + 5, b.y0 as i32 + 5);
     vec![
         InputEvent::MouseMoved { x, y },
         InputEvent::MousePressed { x, y },

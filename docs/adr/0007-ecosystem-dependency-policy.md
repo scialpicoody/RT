@@ -36,4 +36,4 @@ in any tier and are not listed per-tier below.
 | ----------- | ------------------------------------------------------------------------------------------------------- |
 | `rt-core`   | `rt-macros` (first-party workspace crate)                                                               |
 | `rt-app`    | `rt-core`                                                                                               |
-| `rt-gui`    | `winit`, `softbuffer`, `embedded-graphics` (transitional: another ticket retires it), `taffy`, `vello`, `vello_cpu`, `wgpu`, `parley`, `fontique` |
+| `rt-gui`    | `winit`, `softbuffer`, `taffy`, `vello`, `vello_cpu` (0.3), `wgpu`, `parley` (0.12), `fontique` (0.12) — vello family adopted in #20; `embedded-graphics` retired |
