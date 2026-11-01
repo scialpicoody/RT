@@ -1,30 +1,41 @@
-//! Acceptance demo (#10), window leg: the full stack visible on screen.
+//! Acceptance demo (#15), window leg: the full stack visible on screen.
 //!
-//! Bridge (as proven by the #9 spike, `examples/window.rs`):
-//! - winit owns the main thread; softbuffer presents.
-//! - The RT domain (Hub + objects + Gui) lives on a dedicated pump thread —
-//!   it is single-threaded and not `Send` (ADR 0003's thread line), so input
-//!   crosses as messages into an inbox, and frames cross back through a slot
-//!   plus an `EventLoopProxy` wake-up.
-//! - rt-app's `EventLoop` hosting `Send` work (and the whole object chain as
-//!   posted work) is exercised headlessly in `tests/acceptance.rs`.
+//! One [`run_window`] call owns every thread: the platform window lives on
+//! the main thread, the RT loop (Hub + objects + `Gui`) runs on the
+//! presenter's own loop thread holding the [`WindowShell`], and everything
+//! that crosses between is a typed [`WindowMsg`] — input, window events,
+//! user payloads; painted frames come back for presentation (vello_cpu →
+//! softbuffer on the default CPU path). No hand-rolled bridges: no mutex
+//! slots, no condvar pumps, no poll timeouts — the presenter owns the
+//! threading.
 //!
-//! The demo auto-plays: after startup it synthesizes a click inside the
-//! button, the label increments through the object model, and the window
-//! auto-quits after a few seconds. Real clicks work too.
+//! The accepted chain, end to end on a real window: a timer-synthesized
+//! click lands through the shell's hit-tested input routing → the
+//! controller emits `button_clicked` → the cycle's `Hub::flush()` (the
+//! Flush seam) delivers `bump` from the queue → the dirty `count` property
+//! evaluates → `COUNT_CHANGED` reaches the label slot → one label sync →
+//! exactly one damage-gated repaint. The [`Window`] object rides the same
+//! flush: the synthesized close request is queued as a `close_requested`
+//! emission, delivered to an approver slot, and the application — having
+//! audited the end state — confirms it, so the presenter quits with code 0.
+//!
+//! The audit trace is the differentiator vs Qt: the Hub records every
+//! dispatch step, and this demo asserts the exact transcript — event by
+//! event, in delivery order — as it happens. The headless leg of the same
+//! chain lives in `tests/acceptance.rs`.
 
-use std::num::NonZeroU32;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::cell::RefCell;
+use std::collections::HashSet;
+use std::rc::Rc;
 use std::time::Duration;
 
-use rt_core::{Hub, Object, Property, RegistryBuilder, object_impl};
-use rt_gui::{Gui, InputEvent, InputTranslator};
-use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
-use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::window::{Window, WindowAttributes, WindowId};
+use rt_app::{AppHandle, Ctx, TimerId};
+use rt_core::{Handle, Object, Property, TraceEvent, object_impl};
+use rt_gui::input::InputEvent;
+use rt_gui::presenter::{WindowApplication, WindowConfig, WindowMsg, WindowShell, run_window};
+use rt_gui::window::{CloseState, Window, WindowEvent};
+
+// ---------------------------------------------------------------- objects
 
 #[derive(Object)]
 struct Panel;
@@ -59,199 +70,385 @@ impl Bridge {
     }
 }
 
-enum ToWinit {
-    FrameReady,
-    Quit,
+/// Observes the Window object's close request through the Hub — the same
+/// object model the click chain uses, applied to window lifecycle.
+#[derive(Object)]
+struct Approver {
+    close_requests: u32,
+}
+#[object_impl]
+impl Approver {
+    #[slot]
+    fn on_close_requested(&mut self) {
+        self.close_requests += 1;
+    }
 }
 
-/// Shared wiring between the winit thread and the RT pump thread.
-struct Wiring {
-    inbox: Mutex<Vec<InputEvent>>,
-    inbox_signal: Condvar,
-    frame: Mutex<Option<Vec<u32>>>,
-    quit: AtomicBool,
-    clicks_seen: Mutex<u32>,
+// ------------------------------------------------------------ application
+
+/// The demo's object identity, handed over as a plain-data message once the
+/// bootstrap filled the Hub (handles are `Copy`; the objects themselves stay
+/// loop-thread state).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Handles {
+    panel: Handle,
+    counter: Handle,
+    bridge: Handle,
+    approver: Handle,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Demo {
+    Start(Handles),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    Click,
+    Close,
+}
+
+struct AcceptanceApp {
+    objects: Option<Handles>,
+    timers: Vec<(TimerId, Step)>,
+    clicks: u32,
+    /// The label the UI last synced from the flushed bridge state.
+    painted_label: String,
+    label_syncs: u32,
+}
+
+impl WindowApplication<Demo> for AcceptanceApp {
+    fn on_window_message(
+        &mut self,
+        ctx: &mut Ctx<WindowMsg<Demo>>,
+        msg: WindowMsg<Demo>,
+        _shell: &mut WindowShell,
+    ) {
+        if let WindowMsg::User(Demo::Start(objects)) = msg {
+            self.objects = Some(objects);
+            // Auto-play schedule: three clicks, then the close request.
+            self.timers = vec![
+                (ctx.after(Duration::from_millis(150)), Step::Click),
+                (ctx.after(Duration::from_millis(300)), Step::Click),
+                (ctx.after(Duration::from_millis(450)), Step::Click),
+                (ctx.after(Duration::from_millis(750)), Step::Close),
+            ];
+        }
+    }
+
+    fn on_window_timer(
+        &mut self,
+        _ctx: &mut Ctx<WindowMsg<Demo>>,
+        timer: TimerId,
+        shell: &mut WindowShell,
+    ) {
+        let Some(pos) = self.timers.iter().position(|(id, _)| *id == timer) else {
+            return;
+        };
+        let (_, step) = self.timers.remove(pos);
+        let objects = self.objects.expect("objects known before any timer fires");
+        match step {
+            Step::Click => {
+                // Click the button programmatically: synthetic mouse input
+                // routed through the shell (hit test on post-layout geometry).
+                let rect = shell
+                    .gui()
+                    .rect_of(shell.gui().button_id(0))
+                    .expect("button laid out");
+                let (x, y) = (
+                    (rect.x0 + rect.width() / 2.0) as i32,
+                    (rect.y0 + rect.height() / 2.0) as i32,
+                );
+                shell.handle_input(InputEvent::MouseMoved { x, y });
+                shell.handle_input(InputEvent::MousePressed { x, y });
+                let before = shell.gui().click_count();
+                shell.handle_input(InputEvent::MouseReleased { x, y });
+                assert_eq!(
+                    shell.gui().click_count(),
+                    before + 1,
+                    "synthetic click must land on the button"
+                );
+                // The widget-layer fact becomes an object-model emission:
+                // queued now, delivered at this cycle's flush.
+                let reached = shell
+                    .hub_mut()
+                    .emit(objects.panel, Panel::BUTTON_CLICKED, ());
+                assert_eq!(reached, 1, "panel → counter connection must be live");
+                self.clicks += 1;
+            }
+            Step::Close => {
+                // As the window manager would: the Window object records the
+                // request and queues close_requested for the flush.
+                shell.handle_window_event(WindowEvent::CloseRequested);
+            }
+        }
+    }
+
+    fn on_window_cycle(&mut self, _ctx: &mut Ctx<WindowMsg<Demo>>, shell: &mut WindowShell) {
+        // Frame sanity on the real CPU presentation path.
+        let (width, height) = (shell.window().width(), shell.window().height());
+        let frame = shell.gui().frame();
+        assert_eq!(
+            frame.len(),
+            (width * height) as usize,
+            "frame must match the window's physical size"
+        );
+        assert!(
+            frame.iter().collect::<HashSet<_>>().len() > 2,
+            "frame must show background, button, and label pixels"
+        );
+        // Damage discipline: this cycle's single damage-gated paint consumed
+        // every pending mark — the chain never leaks a repaint.
+        assert!(
+            !shell.gui().is_dirty(),
+            "unpainted damage at cycle end"
+        );
+
+        // Model → view sync: the flushed bridge label IS the UI text. One
+        // change, one damage mark, one repaint at the next cycle's paint.
+        let objects = self.objects.expect("objects known before cycles run");
+        let label = shell
+            .hub()
+            .get::<Bridge>(objects.bridge)
+            .expect("bridge live")
+            .label
+            .clone();
+        if label != self.painted_label {
+            shell.gui_mut().set_label(label.clone());
+            assert!(
+                shell.gui().is_dirty(),
+                "the label change schedules exactly its one repaint"
+            );
+            self.painted_label = label;
+            self.label_syncs += 1;
+        }
+
+        // End of the story: every click flowed through and the close request
+        // was delivered through the Window object — audit the end state,
+        // then confirm the close so the presenter quits with code 0.
+        let close_requests = shell
+            .hub()
+            .get::<Approver>(objects.approver)
+            .expect("approver live")
+            .close_requests;
+        if self.clicks == 3 && close_requests == 1 {
+            assert_eq!(self.label_syncs, 3, "one label sync per click");
+            assert_eq!(
+                shell.hub().get::<Counter>(objects.counter).unwrap().count(),
+                3,
+                "each click bumped the count exactly once"
+            );
+            assert_eq!(self.painted_label, "clicks: 3");
+            assert_eq!(
+                shell.window().close_state(),
+                CloseState::PendingClose,
+                "the close request is on the table"
+            );
+            assert!(shell.window_mut().confirm_close(), "close must confirm");
+        }
+    }
+
+    fn on_window_shutdown(&mut self, code: i32) {
+        println!(
+            "acceptance: shutdown with code {code} after {} clicks and {} label syncs",
+            self.clicks, self.label_syncs
+        );
+    }
+}
+
+// -------------------------------------------------------------- transcript
+
+/// Whether a trace event belongs to the demo's objects. Window-level traces
+/// (e.g. the platform resize emission, reached: 0) reference the Window
+/// handle only and are not part of the asserted story.
+fn touches(event: &TraceEvent, watched: &[Handle]) -> bool {
+    match *event {
+        TraceEvent::Connected {
+            emitter,
+            receiver,
+            ..
+        } => watched.contains(&emitter) || watched.contains(&receiver),
+        TraceEvent::Emitted { emitter, .. } => watched.contains(&emitter),
+        TraceEvent::Delivered { receiver, .. } | TraceEvent::DroppedStale { receiver, .. } => {
+            watched.contains(&receiver)
+        }
+        TraceEvent::Disconnected { .. }
+        | TraceEvent::Destroyed { .. }
+        | TraceEvent::DynamicLookup { .. }
+        | TraceEvent::BindingEvaluated { .. } => false,
+    }
+}
+
+/// The exact Hub dispatch transcript the demo will produce: three Connected
+/// records at bootstrap; per click one Emitted (at the emit) and one
+/// Delivered for bump (at the flush's queued phase); the property-change
+/// deliveries (dirty phase) land one flush ahead of the click that caused
+/// them, so click 2's flush delivers click 1's COUNT_CHANGED before its own
+/// queued bump; the close request is delivered last. Signal indices: 0 for
+/// the declared-free Panel and the property-only Counter; the Window's
+/// declared signals come first — resized = 0, close_requested = 1.
+fn transcript(window: Handle, handles: Handles) -> Vec<TraceEvent> {
+    let Handles {
+        panel,
+        counter,
+        bridge,
+        approver,
+    } = handles;
+    let emitted = || TraceEvent::Emitted {
+        emitter: panel,
+        signal_index: 0,
+        reached: 1,
+    };
+    let bumped = || TraceEvent::Delivered {
+        receiver: counter,
+        signal_index: 0,
+    };
+    let changed = || TraceEvent::Delivered {
+        receiver: bridge,
+        signal_index: 0,
+    };
+    vec![
+        TraceEvent::Connected {
+            emitter: panel,
+            receiver: counter,
+            signal_index: 0,
+        },
+        TraceEvent::Connected {
+            emitter: counter,
+            receiver: bridge,
+            signal_index: 0,
+        },
+        TraceEvent::Connected {
+            emitter: window,
+            receiver: approver,
+            signal_index: 1,
+        },
+        emitted(),
+        bumped(),
+        emitted(),
+        changed(),
+        bumped(),
+        emitted(),
+        changed(),
+        bumped(),
+        changed(),
+        TraceEvent::Delivered {
+            receiver: approver,
+            signal_index: 1,
+        },
+    ]
+}
+
+/// Assert-and-print the audit trace: every demo-object event must match the
+/// expected transcript prefix, in order, with no extras. Loop-thread only —
+/// the `Rc` never leaves the thread the Hub lives on.
+fn watch_trace(hub: &mut rt_core::Hub, window: Handle, handles: Handles) {
+    let expected = transcript(window, handles);
+    let watched = [
+        handles.panel,
+        handles.counter,
+        handles.bridge,
+        handles.approver,
+    ];
+    let log: Rc<RefCell<Vec<TraceEvent>>> = Rc::new(RefCell::new(Vec::new()));
+    hub.set_trace({
+        let log = Rc::clone(&log);
+        move |event| {
+            if !touches(&event, &watched) {
+                return;
+            }
+            let mut log = log.borrow_mut();
+            let step = log.len();
+            assert!(
+                step < expected.len(),
+                "audit trace: unexpected extra event {event:?}"
+            );
+            assert_eq!(
+                &event, &expected[step],
+                "audit trace: event {step} diverged from the transcript"
+            );
+            println!("  trace {step:2}: {event:?}");
+            log.push(event);
+            if log.len() == expected.len() {
+                println!(
+                    "audit transcript: {} events, exact match — click → property → flush → change → repaint, close through the Window object",
+                    expected.len()
+                );
+            }
+        }
+    });
+}
+
+// -------------------------------------------------------------------- main
 
 fn main() {
-    let wiring = Arc::new(Wiring {
-        inbox: Mutex::new(Vec::new()),
-        inbox_signal: Condvar::new(),
-        frame: Mutex::new(None),
-        quit: AtomicBool::new(false),
-        clicks_seen: Mutex::new(0),
-    });
+    let code = run_window(
+        WindowConfig {
+            title: "rt-gui acceptance".to_owned(),
+            width: 480,
+            height: 320,
+            ..WindowConfig::default()
+        },
+        AcceptanceApp {
+            objects: None,
+            timers: Vec::new(),
+            clicks: 0,
+            painted_label: "clicks: 0".to_owned(),
+            label_syncs: 0,
+        },
+        |shell: &mut WindowShell, handle: &AppHandle<WindowMsg<Demo>>| {
+            // Registry fill phase (ADR 0002): every object kind the demo uses.
+            shell
+                .registry_mut()
+                .register::<Panel>()
+                .register::<Counter>()
+                .register::<Bridge>()
+                .register::<Approver>();
 
-    let event_loop = EventLoop::<ToWinit>::with_user_event()
-        .build()
-        .expect("winit event loop");
-    let proxy = event_loop.create_proxy();
+            let window = shell.window_handle();
+            let hub = shell.hub_mut();
+            let panel = hub.insert(Panel);
+            let counter = hub.insert(Counter {
+                count: Property::new(0),
+            });
+            let bridge = hub.insert(Bridge {
+                label: "clicks: 0".to_owned(),
+            });
+            let approver = hub.insert(Approver {
+                close_requests: 0,
+            });
 
-    // RT domain thread: registry fill, objects, typed connections, then the
-    // pump — drain input, drive the chain, paint, ship the frame.
-    let rt_wiring = wiring.clone();
-    let rt_proxy = proxy.clone();
-    std::thread::spawn(move || {
-        let mut registry = RegistryBuilder::new();
-        registry
-            .register::<Panel>()
-            .register::<Counter>()
-            .register::<Bridge>();
-        let _registry = registry.build();
-
-        let mut hub = Hub::new();
-        let panel = hub.insert(Panel);
-        let counter = hub.insert(Counter {
-            count: Property::new(0),
-        });
-        let bridge = hub.insert(Bridge {
-            label: String::new(),
-        });
-        hub.connect(panel, Panel::BUTTON_CLICKED, counter, Counter::bump_slot);
-        hub.connect(counter, Counter::COUNT_CHANGED, bridge, Bridge::refresh);
-
-        let mut gui = Gui::new(320, 240);
-        gui.set_label("clicks: 0");
-
-        // Auto-play: one synthetic click so the demo shows itself.
-        let b = gui.button_rect();
-        let (x, y) = (b.x0 as i32 + 5, b.y0 as i32 + 5);
-        let mut inbox = rt_wiring.inbox.lock().unwrap();
-        inbox.extend([
-            InputEvent::MouseMoved { x, y },
-            InputEvent::MousePressed { x, y },
-            InputEvent::MouseReleased { x, y },
-        ]);
-        drop(inbox);
-        rt_wiring.inbox_signal.notify_all();
-
-        let started = std::time::Instant::now();
-        loop {
-            if rt_wiring.quit.load(Ordering::Acquire) || started.elapsed() > Duration::from_secs(4)
-            {
-                let _ = rt_proxy.send_event(ToWinit::Quit);
-                return;
-            }
-
-            let events = {
-                let mut inbox = rt_wiring.inbox.lock().unwrap();
-                std::mem::take(&mut *inbox)
+            // The audit transcript: the soul of the example — determinism
+            // you can assert. Installed before the connects so the
+            // Connected records are on the record too.
+            let handles = Handles {
+                panel,
+                counter,
+                bridge,
+                approver,
             };
-            for event in &events {
-                gui.handle_input(event);
-            }
+            watch_trace(hub, window, handles);
 
-            let mut seen = rt_wiring.clicks_seen.lock().unwrap();
-            if gui.click_count() > *seen {
-                *seen = gui.click_count();
-                drop(seen);
-                hub.emit(panel, Panel::BUTTON_CLICKED, ());
-                while hub.flush() > 0 {}
-                gui.set_label(hub.get::<Bridge>(bridge).unwrap().label.clone());
-            }
+            // Typed connections: click → bump; count change → label refresh;
+            // window close request → approver.
+            hub.connect(panel, Panel::BUTTON_CLICKED, counter, Counter::bump_slot);
+            hub.connect(counter, Counter::COUNT_CHANGED, bridge, Bridge::refresh);
+            hub.connect(
+                window,
+                Window::CLOSE_REQUESTED,
+                approver,
+                Approver::on_close_requested_slot,
+            );
 
-            if let Some(frame) = gui.paint() {
-                *rt_wiring.frame.lock().unwrap() = Some(frame.to_vec());
-                let _ = rt_proxy.send_event(ToWinit::FrameReady);
-            }
-
-            // Park until new input arrives (no busy spin beyond wakeups).
-            let timeout = Duration::from_millis(15);
-            let inbox = rt_wiring.inbox.lock().unwrap();
-            if inbox.is_empty() {
-                let (guard, _) = rt_writing_wait(&rt_wiring, inbox, timeout);
-                drop(guard);
-            }
-        }
-    });
-
-    let mut app = Presenter {
-        wiring: wiring.clone(),
-        window: None,
-        surface: None,
-    };
-    let _ = event_loop.run_app(&mut app);
-}
-
-fn rt_writing_wait<'a>(
-    wiring: &'a Wiring,
-    guard: std::sync::MutexGuard<'a, Vec<InputEvent>>,
-    timeout: Duration,
-) -> (
-    std::sync::MutexGuard<'a, Vec<InputEvent>>,
-    std::sync::WaitTimeoutResult,
-) {
-    wiring.inbox_signal.wait_timeout(guard, timeout).unwrap()
-}
-
-struct Presenter {
-    wiring: Arc<Wiring>,
-    window: Option<Arc<Window>>,
-    surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
-}
-
-impl Presenter {
-    fn present_latest(&mut self) {
-        let (Some(window), Some(surface)) = (&self.window, &mut self.surface) else {
-            return;
-        };
-        let Some(frame) = self.wiring.frame.lock().unwrap().take() else {
-            return;
-        };
-        let size = window.inner_size();
-        let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else {
-            return;
-        };
-        surface.resize(w, h).expect("surface resize");
-        let mut buffer = surface.buffer_mut().expect("buffer");
-        if buffer.len() == frame.len() {
-            buffer.copy_from_slice(&frame);
-            buffer.present().expect("present");
-        }
-    }
-}
-
-impl ApplicationHandler<ToWinit> for Presenter {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let window = Arc::new(
-            event_loop
-                .create_window(
-                    WindowAttributes::default()
-                        .with_title("RT acceptance demo — click counter")
-                        .with_inner_size(LogicalSize::new(320, 240)),
-                )
-                .expect("create window"),
-        );
-        let context = softbuffer::Context::new(window.clone()).expect("context");
-        let surface = softbuffer::Surface::new(&context, window.clone()).expect("surface");
-        self.window = Some(window);
-        self.surface = Some(surface);
-    }
-
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        if event == WindowEvent::RedrawRequested {
-            self.present_latest();
-        }
-        let mut translator = InputTranslator::new();
-        if let Some(input) = translator.translate(&event) {
-            if let InputEvent::CloseRequested = input {
-                self.wiring.quit.store(true, Ordering::Release);
-                event_loop.exit();
-                return;
-            }
-            self.wiring.inbox.lock().unwrap().push(input);
-            self.wiring.inbox_signal.notify_all();
-        }
-    }
-
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, msg: ToWinit) {
-        match msg {
-            ToWinit::FrameReady => {
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                }
-            }
-            ToWinit::Quit => event_loop.exit(),
-        }
-    }
+            shell.gui_mut().set_label("clicks: 0");
+            // The only cross-thread send: hand the loop its objects; its
+            // message handler arms the auto-play timers.
+            handle.send(WindowMsg::User(Demo::Start(handles)));
+        },
+    );
+    println!("acceptance demo exited with code {code}");
+    assert_eq!(
+        code, 0,
+        "the confirmed close must quit with the configured code"
+    );
 }
