@@ -112,7 +112,7 @@ fn main() {
 
         // Auto-play: one synthetic click so the demo shows itself.
         let b = gui.button_rect();
-        let (x, y) = (b.top_left.x + 5, b.top_left.y + 5);
+        let (x, y) = (b.x0 as i32 + 5, b.y0 as i32 + 5);
         let mut inbox = rt_wiring.inbox.lock().unwrap();
         inbox.extend([
             InputEvent::MouseMoved { x, y },

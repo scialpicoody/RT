@@ -10,7 +10,7 @@ fn harness() -> Harness {
 
 fn inside_move(h: &Harness, dx: i32, dy: i32) -> InputEvent {
     let b = h.button_rect();
-    InputEvent::MouseMoved { x: b.top_left.x + dx, y: b.top_left.y + dy }
+    InputEvent::MouseMoved { x: b.x0 as i32 + dx, y: b.y0 as i32 + dy }
 }
 
 #[test]
@@ -73,14 +73,14 @@ fn click_is_counted_as_the_reaction_to_a_full_press_release() {
     let mut h = harness();
     h.paint();
     let p = h.point_in_button();
-    h.feed(InputEvent::MouseMoved { x: p.x, y: p.y });
-    h.feed(InputEvent::MousePressed { x: p.x, y: p.y });
+    h.feed(InputEvent::MouseMoved { x: p.x as i32, y: p.y as i32 });
+    h.feed(InputEvent::MousePressed { x: p.x as i32, y: p.y as i32 });
     assert_eq!(h.clicks(), 0, "press alone does nothing");
-    h.feed(InputEvent::MouseReleased { x: p.x, y: p.y });
+    h.feed(InputEvent::MouseReleased { x: p.x as i32, y: p.y as i32 });
     assert_eq!(h.clicks(), 1);
     // A second full click counts again.
-    h.feed(InputEvent::MousePressed { x: p.x, y: p.y });
-    h.feed(InputEvent::MouseReleased { x: p.x, y: p.y });
+    h.feed(InputEvent::MousePressed { x: p.x as i32, y: p.y as i32 });
+    h.feed(InputEvent::MouseReleased { x: p.x as i32, y: p.y as i32 });
     assert_eq!(h.clicks(), 2);
 }
 
@@ -92,5 +92,5 @@ fn painted_frame_shows_the_button_on_the_background() {
     // Corner pixel of the screen is untouched background ...
     assert_eq!(h.pixel(0, 0), 0);
     // ... while a button rim pixel is painted.
-    assert_ne!(h.pixel(b.top_left.x as u32, b.top_left.y as u32), 0);
+    assert_ne!(h.pixel(b.x0 as u32, b.y0 as u32), 0);
 }

@@ -1,22 +1,19 @@
-//! Button widget: a pressable labeled rect rendered with embedded-graphics
-//! primitives. State changes mark damage; a click is reported as an outcome
-//! (the seam where a core Signal emission plugs in once ticket #5 lands).
+//! Button widget: a pressable labeled rect painted into the vello CPU scene
+//! (fill, 1px border, centered label). State changes mark damage; a click is
+//! reported as an outcome (the seam where a core Signal emission plugs in
+//! once ticket #5 lands).
 
-use embedded_graphics::geometry::Point;
-use embedded_graphics::mono_font::MonoTextStyle;
-use embedded_graphics::mono_font::ascii::FONT_8X13;
-use embedded_graphics::pixelcolor::Rgb888;
-use embedded_graphics::prelude::*;
-use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
-use embedded_graphics::text::Text;
+use vello_cpu::kurbo::{Point, Rect};
+use vello_cpu::peniko::Color;
 
 use crate::input::InputEvent;
+use crate::paint::{LABEL_COLOR, LABEL_FONT_SIZE, Painter, measure_label};
 
 /// Result of feeding one [`InputEvent`] to a widget.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct ButtonOutcome {
     /// Region needing repaint, if the visual state changed.
-    pub damage: Option<Rectangle>,
+    pub damage: Option<Rect>,
     /// Press followed by release inside the button.
     pub clicked: bool,
 }
@@ -37,13 +34,13 @@ enum Visual {
 /// A labeled push button occupying a fixed rectangle (physical pixels).
 #[derive(Debug)]
 pub struct Button {
-    rect: Rectangle,
+    rect: Rect,
     label: String,
     visual: Visual,
 }
 
 impl Button {
-    pub fn new(rect: Rectangle, label: impl Into<String>) -> Self {
+    pub fn new(rect: Rect, label: impl Into<String>) -> Self {
         Self {
             rect,
             label: label.into(),
@@ -51,7 +48,7 @@ impl Button {
         }
     }
 
-    pub fn rect(&self) -> Rectangle {
+    pub fn rect(&self) -> Rect {
         self.rect
     }
 
@@ -60,19 +57,19 @@ impl Button {
     }
 
     /// Current body color (part of the rendering contract).
-    pub fn fill_color(&self) -> Rgb888 {
+    pub fn fill_color(&self) -> Color {
         match self.visual {
-            Visual::Normal => Rgb888::new(0xE0, 0xE0, 0xE0),
-            Visual::Hovered => Rgb888::new(0xF5, 0xF5, 0xF5),
-            Visual::Pressed => Rgb888::new(0xB8, 0xB8, 0xB8),
+            Visual::Normal => Color::from_rgba8(0xE0, 0xE0, 0xE0, 0xFF),
+            Visual::Hovered => Color::from_rgba8(0xF5, 0xF5, 0xF5, 0xFF),
+            Visual::Pressed => Color::from_rgba8(0xB8, 0xB8, 0xB8, 0xFF),
         }
     }
 
     /// Border color (part of the rendering contract).
-    pub fn border_color(&self) -> Rgb888 {
+    pub fn border_color(&self) -> Color {
         match self.visual {
-            Visual::Pressed => Rgb888::new(0x30, 0x30, 0x30),
-            _ => Rgb888::new(0x60, 0x60, 0x60),
+            Visual::Pressed => Color::from_rgba8(0x30, 0x30, 0x30, 0xFF),
+            _ => Color::from_rgba8(0x60, 0x60, 0x60, 0xFF),
         }
     }
 
@@ -80,7 +77,7 @@ impl Button {
     pub fn handle(&mut self, event: &InputEvent) -> ButtonOutcome {
         match *event {
             InputEvent::MouseMoved { x, y } => {
-                let next = if self.contains(Point::new(x, y)) {
+                let next = if self.contains(Point::new(f64::from(x), f64::from(y))) {
                     Visual::Hovered
                 } else {
                     Visual::Normal
@@ -88,7 +85,7 @@ impl Button {
                 self.set_visual(next)
             }
             InputEvent::MousePressed { x, y } => {
-                if self.contains(Point::new(x, y)) {
+                if self.contains(Point::new(f64::from(x), f64::from(y))) {
                     self.set_visual(Visual::Pressed)
                 } else {
                     ButtonOutcome::clean()
@@ -98,7 +95,7 @@ impl Button {
                 if self.visual != Visual::Pressed {
                     return ButtonOutcome::clean();
                 }
-                let inside = self.contains(Point::new(x, y));
+                let inside = self.contains(Point::new(f64::from(x), f64::from(y)));
                 let outcome = self.set_visual(if inside {
                     Visual::Hovered
                 } else {
@@ -125,29 +122,25 @@ impl Button {
     }
 
     /// Paint the button: fill, 1px border, centered label.
-    pub fn render<T: DrawTarget<Color = Rgb888>>(
-        &self,
-        target: &mut T,
-    ) -> Result<(), T::Error> {
-        self.rect
-            .into_styled(PrimitiveStyle::with_fill(self.fill_color()))
-            .draw(target)?;
-        self.rect
-            .into_styled(PrimitiveStyle::with_stroke(self.border_color(), 1))
-            .draw(target)?;
-        let glyph = FONT_8X13.character_size;
-        let text_w = self.label.chars().count() as i32 * glyph.width as i32;
-        let center = self.rect.center();
-        let origin = Point::new(
-            center.x - text_w / 2,
-            center.y - glyph.height as i32 / 2,
-        );
-        Text::new(
-            &self.label,
-            origin,
-            MonoTextStyle::new(&FONT_8X13, Rgb888::new(0x20, 0x20, 0x20)),
-        )
-        .draw(target)
-        .map(|_| ())
+    pub fn render(&self, painter: &mut Painter) {
+        painter.fill_rect(self.rect, self.fill_color());
+        // 1px border as the four rim pixel rows/columns (pixel-aligned, so
+        // rim pixels get the exact border color).
+        let (x0, y0, x1, y1) = (self.rect.x0, self.rect.y0, self.rect.x1, self.rect.y1);
+        let border = self.border_color();
+        painter.fill_rect(Rect::new(x0, y0, x1, y0 + 1.0), border);
+        painter.fill_rect(Rect::new(x0, y1 - 1.0, x1, y1), border);
+        painter.fill_rect(Rect::new(x0, y0 + 1.0, x0 + 1.0, y1 - 1.0), border);
+        painter.fill_rect(Rect::new(x1 - 1.0, y0 + 1.0, x1, y1 - 1.0), border);
+
+        if !self.label.is_empty() {
+            let text_w = measure_label(painter, &self.label);
+            let center = self.rect.center();
+            let top_left = Point::new(
+                center.x - text_w / 2.0,
+                center.y - f64::from(LABEL_FONT_SIZE) / 2.0,
+            );
+            painter.draw_label(&self.label, top_left, LABEL_COLOR);
+        }
     }
 }
