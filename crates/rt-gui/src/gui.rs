@@ -214,6 +214,12 @@ impl Gui {
         Some(&self.frame)
     }
 
+    /// The last painted frame in softbuffer pixel layout (the presenter ships
+    /// this across the thread boundary); zeros until the first paint.
+    pub fn frame(&self) -> &[u32] {
+        &self.frame
+    }
+
     /// Whether any region is dirty (test seam: inspect the damage state).
     pub fn is_dirty(&self) -> bool {
         self.damage.is_dirty()
