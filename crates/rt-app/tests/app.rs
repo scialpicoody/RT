@@ -51,7 +51,7 @@ fn messages_reach_state_and_quit_returns_the_code() {
     assert_eq!(counter.seen, [1, 2]);
     assert_eq!(code, 7);
     // Quit fired during the drain, so the cycle ended before the hook —
-    // matching EventLoop::run, where a quit in the drain skips flush().
+    // a quit in the drain skips flush().
     assert_eq!(counter.cycles, 0);
 }
 

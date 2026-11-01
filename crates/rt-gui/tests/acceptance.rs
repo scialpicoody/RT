@@ -7,9 +7,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use rt_core::{
-    Hub, Object, Property, Registry, RegistryBuilder, TraceEvent, object_impl,
-};
+use rt_core::{Hub, Object, Property, Registry, RegistryBuilder, TraceEvent, object_impl};
 use rt_gui::{Gui, InputEvent};
 
 #[derive(Object)]
@@ -80,7 +78,10 @@ fn full_stack_chain_registry_to_repaint() {
 
     // Explicit registry fill at startup (ADR 0002).
     let mut builder = RegistryBuilder::new();
-    builder.register::<Panel>().register::<Counter>().register::<Bridge>();
+    builder
+        .register::<Panel>()
+        .register::<Counter>()
+        .register::<Bridge>();
     #[cfg(feature = "dynamic-invoke")]
     builder.register::<Recorder>();
     #[cfg_attr(not(feature = "dynamic-invoke"), allow(unused_variables))]
@@ -143,7 +144,11 @@ fn full_stack_chain_registry_to_repaint() {
     assert!(transcript.contains(&TraceEvent::Emitted {
         emitter: panel,
         signal_index: 0,
-        reached: if cfg!(feature = "dynamic-invoke") { 2 } else { 1 },
+        reached: if cfg!(feature = "dynamic-invoke") {
+            2
+        } else {
+            1
+        },
     }));
     assert!(transcript.contains(&TraceEvent::Delivered {
         receiver: bridge,
@@ -154,9 +159,17 @@ fn full_stack_chain_registry_to_repaint() {
     // click reaches nothing, by name or by type.
     hub.destroy(counter);
     #[cfg(feature = "dynamic-invoke")]
-    assert_eq!(hub.emit(panel, Panel::BUTTON_CLICKED, ()), 1, "recorder still connected");
+    assert_eq!(
+        hub.emit(panel, Panel::BUTTON_CLICKED, ()),
+        1,
+        "recorder still connected"
+    );
     #[cfg(not(feature = "dynamic-invoke"))]
-    assert_eq!(hub.emit(panel, Panel::BUTTON_CLICKED, ()), 0, "only the typed connection existed");
+    assert_eq!(
+        hub.emit(panel, Panel::BUTTON_CLICKED, ()),
+        0,
+        "only the typed connection existed"
+    );
     while hub.flush() > 0 {}
     #[cfg(feature = "dynamic-invoke")]
     assert_eq!(hub.get::<Recorder>(recorder).unwrap().ticks, 2);
@@ -167,38 +180,54 @@ fn full_stack_chain_registry_to_repaint() {
 /// the posting boundary — ADR 0003's thread line made visible).
 #[test]
 fn chain_runs_as_posted_loop_work() {
-    use rt_app::{Event, EventLoop};
+    use rt_app::{App, Application, Ctx};
     use std::sync::{Arc, Mutex};
 
-    let (loop_, sender) = EventLoop::new();
-    let transcript: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let sink = transcript.clone();
-    let quitter = sender.clone();
+    type Transcript = Arc<Mutex<Vec<String>>>;
 
-    sender.post_event(Event::Call(Box::new(move || {
-        let mut hub = Hub::new();
-        let panel = hub.insert(Panel);
-        let counter = hub.insert(Counter {
-            count: Property::new(0),
-        });
-        let bridge = hub.insert(Bridge {
-            label: String::new(),
-        });
-        hub.connect(panel, Panel::BUTTON_CLICKED, counter, Counter::bump_slot);
-        hub.connect(counter, Counter::COUNT_CHANGED, bridge, Bridge::refresh);
+    /// Builds the chain on the loop thread when the kick message arrives,
+    /// emits, flushes, records the transcript, and quits the loop.
+    struct Chain {
+        transcript: Transcript,
+    }
 
-        hub.emit(panel, Panel::BUTTON_CLICKED, ());
-        while hub.flush() > 0 {}
+    impl Application for Chain {
+        type Msg = Transcript;
 
-        let mut out = sink.lock().unwrap();
-        out.push(format!(
-            "count={}",
-            hub.get::<Counter>(counter).unwrap().count()
-        ));
-        out.push(hub.get::<Bridge>(bridge).unwrap().label.clone());
-        quitter.quit(0);
-    })));
+        fn on_message(&mut self, ctx: &mut Ctx<Self::Msg>, sink: Self::Msg) {
+            let mut hub = Hub::new();
+            let panel = hub.insert(Panel);
+            let counter = hub.insert(Counter {
+                count: Property::new(0),
+            });
+            let bridge = hub.insert(Bridge {
+                label: String::new(),
+            });
+            hub.connect(panel, Panel::BUTTON_CLICKED, counter, Counter::bump_slot);
+            hub.connect(counter, Counter::COUNT_CHANGED, bridge, Bridge::refresh);
 
-    assert_eq!(loop_.run(), 0, "posted chain ran and quit the loop");
-    assert_eq!(*transcript.lock().unwrap(), ["count=1", "clicks: 1"]);
+            hub.emit(panel, Panel::BUTTON_CLICKED, ());
+            while hub.flush() > 0 {}
+
+            let mut out = sink.lock().unwrap();
+            out.push(format!(
+                "count={}",
+                hub.get::<Counter>(counter).unwrap().count()
+            ));
+            out.push(hub.get::<Bridge>(bridge).unwrap().label.clone());
+            ctx.quit(0);
+        }
+    }
+
+    let transcript: Transcript = Arc::new(Mutex::new(Vec::new()));
+    let (app, handle) = App::new();
+
+    // The RT state is not `Send`; only the transcript slot crosses threads.
+    handle.send(transcript.clone());
+
+    let (chain, code) = app.run(Chain {
+        transcript: transcript.clone(),
+    });
+    assert_eq!(code, 0, "posted chain ran and quit the loop");
+    assert_eq!(*chain.transcript.lock().unwrap(), ["count=1", "clicks: 1"]);
 }
