@@ -12,6 +12,7 @@ winit = "0.30"
 softbuffer = "0.4"
 vello_cpu = "0.3"
 parley = "0.12"
+taffy = "0.15"
 
 [features]
 # Forwards rt-core's by-name path to this crate's examples/tests.

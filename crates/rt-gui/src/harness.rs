@@ -11,6 +11,7 @@ use vello_cpu::kurbo::{Point, Rect};
 
 use crate::gui::Gui;
 use crate::input::InputEvent;
+use crate::tree::{WidgetId, WidgetTree};
 
 /// A windowless [`Gui`] under test with a log of what happened.
 ///
@@ -118,6 +119,48 @@ impl Harness {
     /// The button's center point, for synthetic inside-the-button input.
     pub fn point_in_button(&self) -> Point {
         self.gui.button_rect().center()
+    }
+
+    /// Append a button to the root column; returns its tree id.
+    pub fn push_button(&mut self, label: impl Into<String>) -> WidgetId {
+        self.gui.push_button(label)
+    }
+
+    /// Append an arbitrary widget under `parent` (composition seam).
+    pub fn tree_add_child(
+        &mut self,
+        parent: WidgetId,
+        widget: impl crate::tree::Widget + 'static,
+    ) -> WidgetId {
+        self.gui.add_child(parent, widget)
+    }
+
+    /// Append a button under `parent`; returns its tree id.
+    pub fn tree_add_button(&mut self, parent: WidgetId, label: impl Into<String>) -> WidgetId {
+        self.gui.add_child(parent, crate::widget::Button::new(
+            vello_cpu::kurbo::Rect::ZERO,
+            label,
+        ))
+    }
+
+    /// The `index`-th pushed button's tree id.
+    pub fn button_id(&self, index: usize) -> WidgetId {
+        self.gui.button_id(index)
+    }
+
+    /// The resolved post-layout rect of `id`.
+    pub fn rect_of(&self, id: WidgetId) -> Option<Rect> {
+        self.gui.rect_of(id)
+    }
+
+    /// The root column's tree id.
+    pub fn root_id(&self) -> WidgetId {
+        self.gui.root_id()
+    }
+
+    /// The owned widget tree (read-only).
+    pub fn tree(&self) -> &WidgetTree {
+        self.gui.tree()
     }
 
     /// Whether the last fed event scheduled a repaint.

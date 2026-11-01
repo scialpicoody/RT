@@ -1,7 +1,9 @@
 //! The widget-root orchestrator: owns the frame buffer, the vello paint
-//! engine ([`Painter`]), and the widget tree (one [`Button`] for now); routes
-//! [`InputEvent`]s into widgets, and paints coalesced damage into the frame
-//! at one point — `paint`.
+//! engine ([`Painter`]), and the owned [`WidgetTree`] rooted in a flex
+//! [`Column`]. Layout runs at most once per cycle (before painting and
+//! before mouse routing); mouse events are hit-tested against post-layout
+//! geometry, back to front; painting coalesces damage at one point —
+//! `paint` (Flush discipline).
 //!
 //! SEAM: with rt-core objects in the loop, input dispatch becomes typed
 //! signal emissions and `paint` is driven from the loop's Flush step; the
@@ -12,6 +14,7 @@ use vello_cpu::kurbo::{Point, Rect};
 use crate::damage::Damage;
 use crate::input::InputEvent;
 use crate::paint::{LABEL_COLOR, Painter};
+use crate::tree::{Column, Widget, WidgetId, WidgetTree};
 use crate::widget::Button;
 
 /// One window's widget root and frame, in softbuffer pixel layout.
@@ -20,34 +23,96 @@ pub struct Gui {
     height: u32,
     frame: Vec<u32>,
     painter: Painter,
-    button: Button,
-    label: String,
+    tree: WidgetTree,
+    root: WidgetId,
+    buttons: Vec<WidgetId>,
     damage: Damage,
     clicks: u32,
+    /// The widget currently holding a press, so a release that leaves every
+    /// rect still reaches it (press inside, release outside: visual reset,
+    /// no click — the pre-tree Button semantics).
+    pressed: Option<WidgetId>,
+    /// The widget the cursor is currently over, so a move that leaves every
+    /// rect still reaches the previously hovered widget (it must un-hover).
+    hovered: Option<WidgetId>,
+    label: String,
 }
 
 impl Gui {
     pub fn new(width: u32, height: u32) -> Self {
-        let painter = Painter::new(width, height);
-        let button = Button::new(
-            Rect::new(40.0, 40.0, 200.0, 88.0),
-            "Press me",
-        );
+        let mut tree = WidgetTree::new();
+        let root = tree.set_root(Column {
+            gap: 12.0,
+            padding: 40.0,
+            ..Column::new()
+        });
         let mut damage = Damage::new();
         damage.mark_all(width, height);
-        Self {
+        let mut gui = Self {
             width,
             height,
             frame: vec![0; (width * height) as usize],
-            painter,
-            button,
-            label: String::new(),
+            painter: Painter::new(width, height),
+            tree,
+            root,
+            buttons: Vec::new(),
             damage,
             clicks: 0,
-        }
+            pressed: None,
+            hovered: None,
+            label: String::new(),
+        };
+        gui.push_button("Press me");
+        gui.ensure_layout();
+        gui
     }
 
-    /// Status line rendered under the button; setting it invalidates
+    /// Append a button as the root column's last child; returns its tree id.
+    pub fn push_button(&mut self, label: impl Into<String>) -> WidgetId {
+        let id = self.tree.add_child(self.root, Button::new(Rect::ZERO, label));
+        self.buttons.push(id);
+        self.tree.invalidate_layout();
+        id
+    }
+
+    /// Append an arbitrary widget under `parent` (composition seam).
+    pub fn add_child(
+        &mut self,
+        parent: WidgetId,
+        widget: impl Widget + 'static,
+    ) -> WidgetId {
+        let id = self.tree.add_child(parent, widget);
+        self.tree.invalidate_layout();
+        id
+    }
+
+    /// The tree id of the `index`-th pushed button.
+    pub fn button_id(&self, index: usize) -> WidgetId {
+        self.buttons[index]
+    }
+
+    /// The resolved post-layout rect of `id` (public geometry accessor).
+    pub fn rect_of(&self, id: WidgetId) -> Option<Rect> {
+        self.tree.rect_of(id)
+    }
+
+    /// The root column's id, for composing further children.
+    pub fn root_id(&self) -> WidgetId {
+        self.root
+    }
+
+    /// The owned widget tree (read-only access for tests and composition).
+    pub fn tree(&self) -> &WidgetTree {
+        &self.tree
+    }
+
+    /// The first pushed button's rect (legacy test seam; `None` before the
+    /// first layout or with no buttons).
+    pub fn button_rect(&self) -> Rect {
+        self.rect_of(self.buttons[0]).expect("gui has a laid-out button")
+    }
+
+    /// Status line rendered at the bottom edge; setting it invalidates
     /// everything (basic full repaint).
     pub fn set_label(&mut self, label: impl Into<String>) {
         self.label = label.into();
@@ -63,37 +128,86 @@ impl Gui {
                 self.height = height;
                 self.frame = vec![0; (width * height) as usize];
                 self.painter.resize(width, height);
+                self.tree.invalidate_layout();
+                self.ensure_layout();
                 self.damage.mark_all(width, height);
                 true
             }
             InputEvent::CloseRequested => false,
-            _ => {
-                let outcome = self.button.handle(event);
-                if outcome.clicked {
-                    self.clicks += 1;
-                }
-                match outcome.damage {
-                    Some(rect) => {
-                        self.damage.mark(rect);
-                        true
-                    }
+            InputEvent::MousePressed { x, y } => {
+                self.ensure_layout();
+                let Some(target) = self.tree.hit_test(point(x, y)) else {
+                    return false;
+                };
+                self.pressed = Some(target);
+                self.deliver(target, event)
+            }
+            InputEvent::MouseReleased { x, y } => {
+                self.ensure_layout();
+                // A release routes to the pressed widget even when the cursor
+                // left every rect (stale release reaches nobody otherwise).
+                let Some(target) = self.pressed.take().or_else(|| self.tree.hit_test(point(x, y))) else {
+                    return false;
+                };
+                self.deliver(target, event)
+            }
+            InputEvent::MouseMoved { x, y } => {
+                self.ensure_layout();
+                let target = self.tree.hit_test(point(x, y));
+                let mut scheduled = match target {
+                    Some(target) => self.deliver(target, event),
                     None => false,
+                };
+                if self.hovered != target {
+                    // The previously hovered widget must learn the cursor
+                    // left (it resets its visual and marks damage).
+                    if let Some(previous) = self.hovered {
+                        scheduled |= self.deliver(previous, event);
+                    }
+                    self.hovered = target;
                 }
+                scheduled
             }
         }
     }
 
-    /// Paint when dirty: the widgets emit into the vello scene and the CPU
+    /// Deliver `event` to `target` with its post-layout rect; mark damage on
+    /// visual change, count clicks.
+    fn deliver(&mut self, target: WidgetId, event: &InputEvent) -> bool {
+        let rect = self.tree.rect_of(target).expect("layout ran before routing");
+        let feedback = self.tree.widget_mut(target).handle_input(event, rect);
+        if feedback.clicked {
+            self.clicks += 1;
+        }
+        match feedback.damage {
+            true => {
+                self.damage.mark(rect);
+                true
+            }
+            false => false,
+        }
+    }
+
+    /// Layout at most once per cycle: skipped when clean; a relayout whose
+    /// rects actually changed invalidates everything.
+    fn ensure_layout(&mut self) {
+        if self.tree.layout(self.width, self.height) {
+            self.damage.mark_all(self.width, self.height);
+        }
+    }
+
+    /// Paint when dirty: layout first (at most once per cycle), then the
+    /// widgets emit front to back into the vello scene and the CPU
     /// rasterizer turns it into the frame. Returns the frame, or `None` when
     /// nothing is dirty. (Full-frame repaint; the coalesced damage rect
     /// gates it.)
     pub fn paint(&mut self) -> Option<&[u32]> {
+        self.ensure_layout();
         self.damage.take()?;
         self.painter.begin_frame();
-        self.button.render(&mut self.painter);
+        self.tree.paint(&mut self.painter);
         if !self.label.is_empty() {
-            let b = self.button.rect();
-            let origin = Point::new(b.x0, b.y1 + 4.0);
+            let origin = Point::new(8.0, f64::from(self.height) - 24.0);
             self.painter.draw_label(&self.label, origin, LABEL_COLOR);
         }
         self.painter.render_into(&mut self.frame);
@@ -105,13 +219,12 @@ impl Gui {
         self.damage.is_dirty()
     }
 
-    /// The root button's rect (test seam).
-    pub fn button_rect(&self) -> Rect {
-        self.button.rect()
-    }
-
-    /// Completed press-release clicks on the root button.
+    /// Completed press-release clicks across all widgets.
     pub fn click_count(&self) -> u32 {
         self.clicks
     }
+}
+
+fn point(x: i32, y: i32) -> Point {
+    Point::new(f64::from(x), f64::from(y))
 }

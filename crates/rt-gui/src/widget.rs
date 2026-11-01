@@ -6,8 +6,12 @@
 use vello_cpu::kurbo::{Point, Rect};
 use vello_cpu::peniko::Color;
 
+use taffy::style_helpers::length;
+use taffy::Style;
+
 use crate::input::InputEvent;
 use crate::paint::{LABEL_COLOR, LABEL_FONT_SIZE, Painter, measure_label};
+use crate::tree::{Widget, WidgetFeedback};
 
 /// Result of feeding one [`InputEvent`] to a widget.
 #[derive(Debug, Default, PartialEq)]
@@ -50,6 +54,11 @@ impl Button {
 
     pub fn rect(&self) -> Rect {
         self.rect
+    }
+
+    /// Adopt the layout-resolved rect (the tree calls this post-layout).
+    fn set_rect(&mut self, rect: Rect) {
+        self.rect = rect;
     }
 
     pub fn contains(&self, point: Point) -> bool {
@@ -123,10 +132,15 @@ impl Button {
 
     /// Paint the button: fill, 1px border, centered label.
     pub fn render(&self, painter: &mut Painter) {
-        painter.fill_rect(self.rect, self.fill_color());
+        self.render_at(painter, self.rect);
+    }
+
+    /// Paint into an explicit rect (the tree supplies the layout rect).
+    pub fn render_at(&self, painter: &mut Painter, rect: Rect) {
+        painter.fill_rect(rect, self.fill_color());
         // 1px border as the four rim pixel rows/columns (pixel-aligned, so
         // rim pixels get the exact border color).
-        let (x0, y0, x1, y1) = (self.rect.x0, self.rect.y0, self.rect.x1, self.rect.y1);
+        let (x0, y0, x1, y1) = (rect.x0, rect.y0, rect.x1, rect.y1);
         let border = self.border_color();
         painter.fill_rect(Rect::new(x0, y0, x1, y0 + 1.0), border);
         painter.fill_rect(Rect::new(x0, y1 - 1.0, x1, y1), border);
@@ -135,12 +149,41 @@ impl Button {
 
         if !self.label.is_empty() {
             let text_w = measure_label(painter, &self.label);
-            let center = self.rect.center();
+            let center = rect.center();
             let top_left = Point::new(
                 center.x - text_w / 2.0,
                 center.y - f64::from(LABEL_FONT_SIZE) / 2.0,
             );
             painter.draw_label(&self.label, top_left, LABEL_COLOR);
         }
+    }
+}
+
+impl Widget for Button {
+    fn handle_input(&mut self, input: &InputEvent, _rect: Rect) -> WidgetFeedback {
+        let outcome = self.handle(input);
+        WidgetFeedback {
+            damage: outcome.damage.is_some(),
+            clicked: outcome.clicked,
+        }
+    }
+
+    fn paint(&self, painter: &mut Painter, rect: Rect) {
+        self.render_at(painter, rect);
+    }
+
+    fn style(&self) -> taffy::Style {
+        taffy::Style {
+            size: taffy::Size {
+                width: length(200.0),
+                height: length(88.0),
+            },
+            flex_shrink: 0.0,
+            ..Style::default()
+        }
+    }
+
+    fn sync_rect(&mut self, rect: Rect) {
+        self.set_rect(rect);
     }
 }
