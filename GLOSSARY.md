@@ -25,8 +25,8 @@ The static description of a kind of object: its signals, slots, properties, and 
 _Avoid_: reflection data, class info
 
 **Registry**:
-The runtime's read-only index from a kind of object to its MetaObject.
-_Avoid_: type store, metatype system
+The runtime's read-only index from a kind of object to its MetaObject; also the by-name surface's factory source — kinds that declare a construction rule (`#[object(default = expr)]` or `#[object(default)]`) can be created, kind-checked (`is_a`), and member-listed through the dynamic path. Filled once at startup with the `registry![...]` composer or the explicit builder chain; duplicates are hard errors.
+_Avoid_: type store, metatype system, injection container
 
 **Flush**:
 The single deterministic step in which queued emissions are delivered and dirty properties are evaluated.

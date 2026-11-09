@@ -263,3 +263,60 @@ fn parent_members_merge_with_offset_indices() {
         .expect("own property merges");
     assert_eq!(index_from_button, Button::meta().signals.len() as u32);
 }
+
+// Factory emission (spec #36): `#[object(default = expr)]` and bare
+// `#[object(default)]` produce a factory on the static MetaObject; kinds
+// without a rule register none.
+
+#[derive(Object)]
+#[object(default = DefaultedSolo { hidden: true })]
+struct DefaultedSolo {
+    hidden: bool,
+}
+
+#[object_impl]
+impl DefaultedSolo {}
+
+#[derive(Object, Default)]
+#[object(default)]
+struct DefaultDefaulted {
+    hits: u32,
+}
+
+#[object_impl]
+impl DefaultDefaulted {}
+
+#[derive(Object)]
+struct NoDefault {
+    value: u32,
+}
+
+#[object_impl]
+impl NoDefault {}
+
+#[test]
+fn default_expression_becomes_a_factory() {
+    let meta = DefaultedSolo::meta();
+    let factory = meta.factory.clone().expect("default = expr emits a factory");
+    let value = (factory.construct)();
+    let solo = value
+        .downcast_ref::<DefaultedSolo>()
+        .expect("factory builds the derived type");
+    assert!(solo.hidden, "expression seed state survives construction");
+}
+
+#[test]
+fn bare_default_builds_via_default_impl() {
+    let meta = DefaultDefaulted::meta();
+    let factory = meta.factory.clone().expect("bare default emits a factory");
+    let value = (factory.construct)();
+    let obj = value
+        .downcast_ref::<DefaultDefaulted>()
+        .expect("factory builds the derived type");
+    assert_eq!(obj.hits, 0, "Default::default zero state");
+}
+
+#[test]
+fn no_rule_registers_no_factory() {
+    assert!(NoDefault::meta().factory.is_none());
+}

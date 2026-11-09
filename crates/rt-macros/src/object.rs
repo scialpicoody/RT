@@ -16,6 +16,7 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream, Error> {
     }
 
     let parent = parent_path(&input)?;
+    let default = default_rule(&input)?;
     let parent_field = parent_value_field(&input, parent.as_ref())?;
     let parent_thunk = parent.as_ref().map_or_else(
         || quote!(None),
@@ -188,6 +189,26 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream, Error> {
     });
     let parent_route = parent_route.unwrap_or_else(|| quote!(None));
 
+    // By-name construction rule: `#[object(default = expr)]` constructs via
+    // the expression; a bare `#[object(default)]` via `Default::default()`
+    // (explicit opt-in — a proc macro cannot see trait impls); absent means
+    // the kind registers no factory and is not by-name constructible.
+    let factory = match default {
+        Some(Some(expr)) => quote! {
+            ::std::option::Option::Some(::rt_core::meta::ObjectFactory {
+                construct: || ::std::boxed::Box::new(#expr),
+                props: ::rt_core::signal::props_shim::<#ident>,
+            })
+        },
+        Some(None) => quote! {
+            ::std::option::Option::Some(::rt_core::meta::ObjectFactory {
+                construct: || ::std::boxed::Box::new(<#ident as ::core::default::Default>::default()),
+                props: ::rt_core::signal::props_shim::<#ident>,
+            })
+        },
+        None => quote!(::std::option::Option::None),
+    };
+
     Ok(quote! {
         #[automatically_derived]
         impl ::rt_core::property::PropertyInputs for #ident {
@@ -249,6 +270,7 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream, Error> {
                     properties: &[#(#descriptors),*],
                     slot_invokers: <#ident as ::rt_core::meta::ObjectInputs>::SLOT_INVOKERS,
                     parent_route: #parent_route,
+                    factory: #factory,
                 };
                 &META
             }
@@ -284,10 +306,64 @@ fn parent_path(input: &DeriveInput) -> Result<Option<syn::Path>, Error> {
                 }
                 found = Some(path);
                 Ok(())
+            } else if meta.path.is_ident("default") {
+                // parse_nested_meta arms must consume their `= value` even
+                // when the arm itself defers to another pass — leaving the
+                // tokens unconsumed fails the parse with a bare
+                // "expected `,`" inside the same attribute. The bare form
+                // has no value to consume.
+                if !meta.input.is_empty() {
+                    let _expr: syn::Expr = meta.value()?.parse()?;
+                }
+                Ok(())
             } else {
                 Err(Error::new_spanned(
                     meta.path,
-                    "unknown #[object] item; expected `parent = Type`",
+                    "unknown #[object] item; expected `parent = Type`, `default`, or `default = expr`",
+                ))
+            }
+        })?;
+    }
+    Ok(found)
+}
+
+/// `#[object(default = expr)]` -> `Some(Some(expr))`; bare `#[object(default)]`
+/// -> `Some(None)` (the derive emits a `Default::default()` factory); absent
+/// -> `None`. A proc macro cannot see whether the type implements `Default`,
+/// so the fallback is an explicit opt-in — misuse fails at the derive
+/// expansion, not silently at first use.
+fn default_rule(input: &DeriveInput) -> Result<Option<Option<syn::Expr>>, Error> {
+    let mut found: Option<Option<syn::Expr>> = None;
+    for attr in input
+        .attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("object"))
+    {
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("default") {
+                let expr = if meta.input.is_empty() {
+                    None
+                } else {
+                    Some(meta.value()?.parse::<syn::Expr>()?)
+                };
+                if found.is_some() {
+                    return Err(Error::new_spanned(
+                        meta.path,
+                        "duplicate `#[object(default ..)]`; declare it once per type",
+                    ));
+                }
+                found = Some(expr);
+                Ok(())
+            } else if meta.path.is_ident("parent") {
+                // parse_nested_meta arms must each consume their `= value`;
+                // skipping the value here would leave `= Base` tokens that
+                // fail the attribute parse with a bare "expected `,`".
+                let _parent: syn::Path = meta.value()?.parse()?;
+                Ok(())
+            } else {
+                Err(Error::new_spanned(
+                    meta.path,
+                    "unknown #[object] item; expected `parent = Type`, `default`, or `default = expr`",
                 ))
             }
         })?;
@@ -550,3 +626,4 @@ mod parent_field_tests {
         assert!(error.to_string().contains("unknown #[object] field item"));
     }
 }
+

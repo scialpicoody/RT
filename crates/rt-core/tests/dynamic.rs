@@ -313,3 +313,234 @@ fn property_by_name_rejects_unknown_names_and_payloads() {
         _ => panic!("expected StaleHandle"),
     }
 }
+
+// By-name construction, kind checks, and member listings (spec #36).
+
+#[derive(Object)]
+#[object(default = (Fader { level: Property::new(3) }))]
+struct Fader {
+    #[property]
+    level: Property<u8>,
+}
+#[object_impl]
+impl Fader {
+    #[signal]
+    fn slid(&self, to: u8);
+}
+
+#[derive(Object)]
+#[object(default)]
+struct Lamp {
+    #[property]
+    lit: Property<bool>,
+}
+#[object_impl]
+impl Lamp {}
+
+impl Default for Lamp {
+    fn default() -> Self {
+        Self {
+            lit: Property::new(false),
+        }
+    }
+}
+
+#[derive(Object)]
+struct SealedKind {
+    secret: u32,
+}
+#[object_impl]
+impl SealedKind {}
+
+#[derive(Object)]
+#[object(parent = Fader)]
+struct TiltFader {
+    parent: Fader,
+    #[property]
+    tilt: Property<i8>,
+}
+#[object_impl]
+impl TiltFader {
+    #[slot]
+    fn recalibrate(&mut self) {}
+}
+
+fn full_registry() -> rt_core::Registry {
+    use rt_core::Registry;
+    let mut builder = RegistryBuilder::new();
+    builder
+        .register::<Knob>()
+        .register::<Display>()
+        .register::<Fader>()
+        .register::<Lamp>()
+        .register::<SealedKind>()
+        .register::<TiltFader>();
+    builder.build()
+}
+
+#[test]
+fn create_by_name_builds_a_live_object() {
+    let registry = full_registry();
+    let mut hub = Hub::new();
+    let handle = hub
+        .dynamic(&registry)
+        .create_by_name("Fader")
+        .expect("Fader has a default = expr factory");
+    let fader = hub.get::<Fader>(handle).expect("created object is a Fader");
+    assert_eq!(fader.level(), 3, "expression seed state survives");
+    // Liveness: the typed getter still resolves the handle.
+}
+
+#[test]
+fn bare_default_create_starts_at_default_state() {
+    let registry = full_registry();
+    let mut hub = Hub::new();
+    let handle = hub
+        .dynamic(&registry)
+        .create_by_name("Lamp")
+        .expect("Lamp has a Default fallback factory");
+    let lamp = hub.get::<Lamp>(handle).expect("created object is a Lamp");
+    assert!(!lamp.lit(), "Default::default zero state");
+}
+
+#[test]
+fn factoryless_kind_is_not_constructible() {
+    let registry = full_registry();
+    let mut hub = Hub::new();
+    let error = hub
+        .dynamic(&registry)
+        .create_by_name("SealedKind")
+        .expect_err("no #[object(default ..)] declared");
+    assert_eq!(
+        error,
+        DynamicError::NotConstructible { owner: "SealedKind" }
+    );
+}
+
+#[test]
+fn unknown_kind_names_are_errors() {
+    let registry = full_registry();
+    let mut hub = Hub::new();
+    let error = hub
+        .dynamic(&registry)
+        .create_by_name("NoSuchKind")
+        .expect_err("kind never registered");
+    assert_eq!(error, DynamicError::UnknownKind { kind: "NoSuchKind" });
+}
+
+#[test]
+fn created_objects_serve_the_full_by_name_surface() {
+    let registry = full_registry();
+    let mut hub = Hub::new();
+    let mut dy = hub.dynamic(&registry);
+    let fader = dy.create_by_name("Fader").expect("creates");
+    let display = hub.insert(Display { log: Vec::new() });
+
+    let connection = hub
+        .dynamic(&registry)
+        .connect_by_name(fader, "slid", display, "show")
+        .expect("created object connects by name");
+    hub.dynamic(&registry)
+        .emit_by_name(fader, "slid", Box::new(9u8))
+        .expect("payload matches the declared type");
+    while hub.flush() > 0 {}
+    assert_eq!(
+        hub.get::<Display>(display).unwrap().log,
+        vec!["steps:9".to_string()],
+        "by-name delivery reaches the created object's connections"
+    );
+    drop(connection);
+}
+
+#[test]
+fn is_a_spans_the_inheritance_chain() {
+    let registry = full_registry();
+    let mut hub = Hub::new();
+    let tilt = hub.insert(TiltFader {
+        parent: Fader {
+            level: Property::new(0),
+        },
+        tilt: Property::new(0),
+    });
+
+    let mut dy = hub.dynamic(&registry);
+    assert!(dy.is_a(tilt, "TiltFader").expect("own kind"));
+    assert!(hub
+        .dynamic(&registry)
+        .is_a(tilt, "Fader")
+        .expect("parent kind"));
+    let unrelated = hub
+        .dynamic(&registry)
+        .is_a(tilt, "Knob")
+        .expect("registered sibling");
+    assert!(!unrelated, "sibling kind is not an ancestor");
+    assert!(hub
+        .dynamic(&registry)
+        .is_a(tilt, "NoSuchKind")
+        .is_err_and(|e| matches!(e, DynamicError::UnknownKind { .. })));
+}
+
+#[test]
+fn is_a_rejects_stale_handles() {
+    let registry = full_registry();
+    let mut hub = Hub::new();
+    let lamp = hub.insert(Lamp {
+        lit: Property::new(false),
+    });
+    hub.destroy(lamp);
+    let error = hub
+        .dynamic(&registry)
+        .is_a(lamp, "Lamp")
+        .expect_err("destroyed handle");
+    assert!(matches!(error, DynamicError::StaleHandle { .. }));
+}
+
+#[test]
+fn listings_cover_the_chain_with_owning_levels() {
+    let registry = full_registry();
+    let mut hub = Hub::new();
+    let tilt = hub.insert(TiltFader {
+        parent: Fader {
+            level: Property::new(0),
+        },
+        tilt: Property::new(0),
+    });
+
+    let signals = hub
+        .dynamic(&registry)
+        .signals_of(tilt)
+        .expect("signals list");
+    assert_eq!(
+        signals,
+        vec![("slid", 1u8)],
+        "the chain's only `slid` lives on the parent level — shadowing is a registration error"
+    );
+
+    let slots = hub.dynamic(&registry).slots_of(tilt).expect("slots list");
+    assert_eq!(slots, vec![("recalibrate", 0u8)]);
+
+    let properties = hub
+        .dynamic(&registry)
+        .properties_of(tilt)
+        .expect("properties list");
+    assert_eq!(
+        properties,
+        vec![("tilt", 0u8), ("level", 1u8)],
+        "own properties in declaration order, then the parent level's"
+    );
+}
+
+#[test]
+fn listings_of_stale_handles_error() {
+    let registry = full_registry();
+    let mut hub = Hub::new();
+    let lamp = hub.insert(Lamp {
+        lit: Property::new(false),
+    });
+    hub.destroy(lamp);
+    let error = hub
+        .dynamic(&registry)
+        .signals_of(lamp)
+        .expect_err("stale handle");
+    assert!(matches!(error, DynamicError::StaleHandle { .. }));
+}

@@ -7,7 +7,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use rt_core::{Hub, Object, Property, Registry, RegistryBuilder, TraceEvent, object_impl};
+use rt_core::{Hub, Object, Property, TraceEvent, object_impl};
 use rt_gui::{Gui, InputEvent};
 
 #[derive(Object)]
@@ -76,16 +76,12 @@ fn full_stack_chain_registry_to_repaint() {
         move |e| sink.borrow_mut().push(e)
     });
 
-    // Explicit registry fill at startup (ADR 0002).
-    let mut builder = RegistryBuilder::new();
-    builder
-        .register::<Panel>()
-        .register::<Counter>()
-        .register::<Bridge>();
+    // Explicit registry fill at startup (ADR 0002): the declarative composer
+    // spells the list once; the by-name shadow kind joins under its feature.
     #[cfg(feature = "dynamic-invoke")]
-    builder.register::<Recorder>();
-    #[cfg_attr(not(feature = "dynamic-invoke"), allow(unused_variables))]
-    let registry: Registry = builder.build();
+    let registry = rt_core::registry![Panel, Counter, Bridge, Recorder];
+    #[cfg(not(feature = "dynamic-invoke"))]
+    let registry = rt_core::registry![Panel, Counter, Bridge];
 
     let panel = hub.insert(Panel);
     let counter = hub.insert(Counter {

@@ -9,9 +9,9 @@ use crate::Object;
 
 /// Mutable fill phase, consumed by [`RegistryBuilder::build`].
 ///
-/// Crates expose a hand-written `fn register_all(builder: &mut RegistryBuilder)`
-/// listing their object kinds; `main` orchestrates the calls (a generated form
-/// lands with `rt-macros` later). No auto-registration.
+/// Fill it with the declarative [`registry!`] composer or a hand-written
+/// `fn register_all(builder: &mut RegistryBuilder)` listing the object
+/// kinds; `main` orchestrates the calls. No auto-registration.
 #[derive(Default)]
 pub struct RegistryBuilder {
     by_type_id: HashMap<TypeId, &'static MetaObject>,
@@ -97,7 +97,6 @@ pub struct Registry {
     by_type_id: HashMap<TypeId, &'static MetaObject>,
     by_name: HashMap<&'static str, &'static MetaObject>,
 }
-
 impl Registry {
     pub fn by_type_id(&self, id: TypeId) -> Option<&'static MetaObject> {
         self.by_type_id.get(&id).copied()
@@ -107,6 +106,16 @@ impl Registry {
         self.by_name.get(name).copied()
     }
 
+    /// The TypeId the kind was registered under — the identity a value of
+    /// this kind reports from `Any::type_id`, needed by the by-name
+    /// creation path to store a freshly constructed erased value.
+    pub fn type_id_of(&self, meta: &MetaObject) -> Option<TypeId> {
+        self.by_type_id
+            .iter()
+            .find(|(_, registered)| core::ptr::eq(**registered, meta))
+            .map(|(id, _)| *id)
+    }
+
     pub fn len(&self) -> usize {
         self.by_name.len()
     }
@@ -114,4 +123,33 @@ impl Registry {
     pub fn is_empty(&self) -> bool {
         self.by_name.is_empty()
     }
+}
+
+/// Declarative registry fill: `registry![Widget, Button, my_mod::Slider]`
+/// expands to the explicit `register::<T>()` chain on a fresh builder —
+/// one line per kind, still spelled out at the call site (ADR 0002: the
+/// list is explicit, no auto-registration). A kind that is not an
+/// `#[derive(Object)]` type fails to compile right here, instead of
+/// surfacing later as a by-name lookup error.
+///
+/// Returns the sealed read-only [`Registry`].
+///
+/// ```
+/// use rt_core::{Object, Registry, registry, object_impl};
+///
+/// #[derive(Object)]
+/// struct Gauge;
+/// #[object_impl]
+/// impl Gauge {}
+///
+/// let reg: Registry = registry![Gauge];
+/// assert!(reg.by_name("Gauge").is_some());
+/// ```
+#[macro_export]
+macro_rules! registry {
+    [$($kind:ty),+ $(,)?] => {{
+        let mut builder = $crate::RegistryBuilder::new();
+        $( builder.register::<$kind>(); )+
+        builder.build()
+    }};
 }

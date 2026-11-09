@@ -67,3 +67,29 @@ fn duplicate_name_is_a_hard_error() {
         .register::<Button>()
         .register::<shadowed::Button>();
 }
+
+// The declarative composer (spec #36): `registry![...]` fills the builder
+// with the same explicit chain, sealed read-only, with the same duplicate
+// hard errors. A kind missing the Object trait fails to compile here, not
+// later as a by-name lookup error.
+
+#[test]
+fn composer_registers_each_kind_and_seals() {
+    let registry = rt_core::registry![Widget, Button];
+    assert!(registry.by_name("Widget").is_some());
+    assert!(registry.by_name("Button").is_some());
+    assert!(same_meta(registry.by_name("Widget"), Widget::meta()));
+    assert_eq!(registry.len(), 2);
+}
+
+#[test]
+fn composer_duplicate_kind_is_a_hard_error() {
+    let result = std::panic::catch_unwind(|| rt_core::registry![Widget, Widget]);
+    assert!(result.is_err(), "duplicate kind registration panics at startup");
+}
+
+#[test]
+fn composer_trailing_comma_is_accepted() {
+    let registry = rt_core::registry![Widget,];
+    assert_eq!(registry.len(), 1);
+}

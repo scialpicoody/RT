@@ -23,6 +23,11 @@ pub enum DynamicError {
     ArityMismatch { owner: &'static str, signal: &'static str, slot: &'static str },
     /// The payload's type did not match the declared type.
     PayloadMismatch { expected: &'static str },
+    /// The kind name is not in the Registry.
+    UnknownKind { kind: &'static str },
+    /// The kind exists but declares no construction rule: neither
+    /// `#[object(default = expr)]` nor `#[object(default)]`.
+    NotConstructible { owner: &'static str },
 }
 
 /// The single by-name entry point: `hub.dynamic(&registry)` — exists only
@@ -301,4 +306,105 @@ impl Dynamic<'_> {
             }),
         }
     }
+
+    /// Construct a fresh instance of the named kind and store it in the Hub,
+    /// exactly as a typed insert had. The kind must be registered and carry
+    /// a factory (`#[object(default = expr)]` or `#[object(default)]`).
+    pub fn create_by_name(&mut self, kind: &'static str) -> Result<Handle, DynamicError> {
+        let Some((meta, type_id)) = self
+            .registry
+            .by_name(kind)
+            .map(|meta| (meta, self.registry.type_id_of(meta)))
+            .and_then(|(meta, type_id)| type_id.map(|id| (meta, id)))
+        else {
+            self.hub.trace_event(TraceEvent::DynamicLookup {
+                name: kind,
+                resolved: false,
+            });
+            return Err(DynamicError::UnknownKind { kind });
+        };
+        let factory = meta.factory.clone().ok_or(DynamicError::NotConstructible {
+            owner: meta.type_name,
+        })?;
+        let value = (factory.construct)();
+        Ok(self.hub.insert_erased(type_id, factory.props, value))
+    }
+
+    /// Whether the object behind `handle` belongs to the named kind or
+    /// inherits from it. The name resolves through the Registry and the
+    /// check compares static MetaObject addresses down the parent chain —
+    /// never display strings. Traced like every by-name lookup.
+    pub fn is_a(&mut self, handle: Handle, kind: &'static str) -> Result<bool, DynamicError> {
+        let meta = self.registry.by_name(kind).ok_or(DynamicError::UnknownKind { kind })?;
+        let Some(type_id) = self.hub.type_of(handle) else {
+            self.hub.trace_event(TraceEvent::DynamicLookup {
+                name: kind,
+                resolved: false,
+            });
+            return Err(DynamicError::StaleHandle { name: kind });
+        };
+        self.hub.trace_event(TraceEvent::DynamicLookup {
+            name: kind,
+            resolved: true,
+        });
+        match self.registry.by_type_id(type_id) {
+            Some(actual) => Ok(actual.inherits(meta)),
+            // A live object whose kind is not registered still has a true
+            // identity; without its MetaObject the chain is unknowable.
+            None => Err(DynamicError::StaleHandle { name: kind }),
+        }
+    }
+
+    /// Signals of the chain behind `handle`, own level first, declaration
+    /// order within a level; each entry names its owning level (`0` = own).
+    /// Traced once for the whole listing.
+    pub fn signals_of(
+        &mut self,
+        handle: Handle,
+    ) -> Result<Vec<(&'static str, u8)>, DynamicError> {
+        let (meta, _) = self.meta_of(handle, "signals")?;
+        self.hub.trace_event(TraceEvent::DynamicLookup {
+            name: "signals",
+            resolved: true,
+        });
+        Ok(meta
+            .signal_chain()
+            .into_iter()
+            .map(|(signal, up)| (signal.name, up))
+            .collect())
+    }
+
+    /// Slots of the chain behind `handle`, own level first, declaration
+    /// order within a level; each entry names its owning level (`0` = own).
+    pub fn slots_of(&mut self, handle: Handle) -> Result<Vec<(&'static str, u8)>, DynamicError> {
+        let (meta, _) = self.meta_of(handle, "slots")?;
+        self.hub.trace_event(TraceEvent::DynamicLookup {
+            name: "slots",
+            resolved: true,
+        });
+        Ok(meta
+            .slot_chain()
+            .into_iter()
+            .map(|(slot, up)| (slot.name, up))
+            .collect())
+    }
+
+    /// Properties of the chain behind `handle`, own level first, declaration
+    /// order within a level; each entry names its owning level (`0` = own).
+    pub fn properties_of(
+        &mut self,
+        handle: Handle,
+    ) -> Result<Vec<(&'static str, u8)>, DynamicError> {
+        let (meta, _) = self.meta_of(handle, "properties")?;
+        self.hub.trace_event(TraceEvent::DynamicLookup {
+            name: "properties",
+            resolved: true,
+        });
+        Ok(meta
+            .property_chain()
+            .into_iter()
+            .map(|(property, up)| (property.name, up))
+            .collect())
+    }
 }
+
